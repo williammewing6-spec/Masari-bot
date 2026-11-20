@@ -17,12 +17,16 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 
 // ---------- Telegram API ----------
 async function tg(env, method, body = {}) {
-  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return r.json().catch(() => ({ ok: false }));
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await r.json().catch(() => ({ ok: false }));
+  } catch (e) {
+    return { ok: false }; // a Telegram network hiccup must never crash the update
+  }
 }
 const send = (env, chat, text, kb) =>
   tg(env, 'sendMessage', { chat_id: chat, text, parse_mode: 'HTML', reply_markup: kb, disable_web_page_preview: true });
@@ -170,7 +174,7 @@ async function history(env, uid) {
 
 async function referral(env, uid) {
   const bot = await tg(env, 'getMe');
-  const link = `https://t.me/${bot.result.username}?start=ref_${uid}`;
+  const link = `https://t.me/${bot?.result?.username || 'masari1bot'}?start=ref_${uid}`;
   const rw = await setting(env, 'ref_worker_pct', '5');
   const rc = await setting(env, 'ref_client_pct', '10');
   const count = await one(env, 'SELECT COUNT(*) n FROM users WHERE referrer_id=?', uid);
@@ -201,6 +205,14 @@ async function priceList(env, uid) {
 }
 
 // ---------- Client self-serve ordering ----------
+async function orderIntro(env, uid) {
+  return send(env, uid, '➕ <b>طلب خدمة</b>\nاختار خدمة جاهزة من القائمة والسعر بينحسب و بينخصم من رصيدك فوراً، والمهمة بتنزل للعمال لحالها.\nأو إذا طلبك خاص ومش موجود بالقائمة، ابعتو كنص حر و الإدارة بتراجعو:',
+    { inline_keyboard: [
+      [{ text: '🛒 اطلب من قائمة الخدمات', callback_data: 'ordcats' }],
+      [{ text: '💰 قائمة الأسعار', callback_data: 'prices' }, { text: '✍️ طلب خاص', callback_data: 'ordspecial' }],
+    ] });
+}
+
 async function orderCategories(env, uid, parentId = null) {
   const cats = parentId
     ? await all(env, 'SELECT * FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id', parentId)
@@ -658,19 +670,21 @@ async function handleMessage(env, msg) {
 
   // Active wizard state consumes text/photo first (except menu buttons).
   const st = await getState(env, uid);
-  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن'].includes(text);
+  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن','/wallet','/balance','/tasks','/order'].includes(text);
   if (st.state && !isMenuBtn && (text || msg.photo)) return handleStateText(env, uid, st, msg);
   if (isMenuBtn) await clearState(env, uid);
 
   switch (text) {
+    case '/wallet': return wallet(env, uid);
+    case '/balance': {
+      const me = await getUser(env, uid);
+      return send(env, uid, `💰 رصيدك الحالي: <b>${fmt(me?.balance)} ل.س</b>`, mainKb(env, uid));
+    }
+    case '/tasks': return listCategories(env, uid);
+    case '/order': return orderIntro(env, uid);
     case '📋 المهام المتاحة': return listCategories(env, uid);
     case '🛠 مهامي': return myTasks(env, uid);
-    case '➕ اطلب خدمة':
-      return send(env, uid, '➕ <b>طلب خدمة</b>\nاختار خدمة جاهزة من القائمة والسعر بينحسب و بينخصم من رصيدك فوراً، والمهمة بتنزل للعمال لحالها.\nأو إذا طلبك خاص ومش موجود بالقائمة، ابعتو كنص حر و الإدارة بتراجعو:',
-        { inline_keyboard: [
-          [{ text: '🛒 اطلب من قائمة الخدمات', callback_data: 'ordcats' }],
-          [{ text: '💰 قائمة الأسعار', callback_data: 'prices' }, { text: '✍️ طلب خاص', callback_data: 'ordspecial' }],
-        ] });
+    case '➕ اطلب خدمة': return orderIntro(env, uid);
     case '📦 طلباتي': {
       const rows = await all(env, 'SELECT * FROM orders WHERE client_id=? ORDER BY id DESC LIMIT 10', uid);
       const myT = await all(env, "SELECT * FROM tasks WHERE client_id=? ORDER BY id DESC LIMIT 10", uid);

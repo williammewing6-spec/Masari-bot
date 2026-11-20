@@ -119,7 +119,8 @@ async function listCategories(env, uid, parentId = null) {
 
 async function listTasks(env, uid, catId) {
   const tasks = await all(env, "SELECT * FROM tasks WHERE category_id=? AND status='open' ORDER BY id DESC", catId);
-  if (!tasks.length) return send(env, uid, 'ما في مهام مفتوحة بهالتصنيف حالياً.', backKb);
+  const adminRow = isAdmin(env, uid) ? [[{ text: '➕ ضيف مهمة بهالتصنيف', callback_data: `adm:newtask:${catId}` }]] : [];
+  if (!tasks.length) return send(env, uid, 'ما في مهام مفتوحة بهالتصنيف حالياً.', { inline_keyboard: [...adminRow, [{ text: '⬅️ رجوع', callback_data: 'home' }]] });
   for (const t of tasks) {
     const mine = await one(env, 'SELECT status FROM claims WHERE task_id=? AND worker_id=?', t.id, uid);
     const left = t.slots_total - t.slots_done;
@@ -129,6 +130,7 @@ async function listTasks(env, uid, catId) {
       : [[{ text: '✋ آخد هالمهمة', callback_data: `take:${t.id}` }]];
     await send(env, uid, txt, { inline_keyboard: btn });
   }
+  if (isAdmin(env, uid)) await send(env, uid, '👑 <b>أدمن:</b>', { inline_keyboard: adminRow });
 }
 
 async function myTasks(env, uid) {
@@ -173,6 +175,23 @@ async function referral(env, uid) {
     `• وبتاخد <b>${rc}%</b> من قيمة كل طلب بيحطو عميل بيجي من رابطك.\n` +
     `• الأرباح بتنضاف لرصيدك تلقائياً لحظة قبول التنفيذ.\n\n` +
     `👥 إحالاتك: ${count.n} شخص\n💰 مجموع أرباحك من الإحالة: ${fmt(earned.s)} ل.س\n\n🔗 رابطك:\n${link}`, backKb);
+}
+
+// ---------- Client price list (client-facing prices only) ----------
+async function priceList(env, uid) {
+  const tasks = await all(env, `SELECT t.*, c.name cname, p.name pname FROM tasks t
+    LEFT JOIN categories c ON c.id=t.category_id LEFT JOIN categories p ON p.id=c.parent_id
+    WHERE t.status='open' ORDER BY c.parent_id, c.id, t.id`);
+  if (!tasks.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', backKb);
+  let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر محسوب عن كل تنفيذ واحد:\n';
+  let lastCat = '';
+  for (const t of tasks) {
+    const cat = `${t.pname ? esc(t.pname) + ' / ' : ''}${esc(t.cname || 'بدون تصنيف')}`;
+    if (cat !== lastCat) { txt += `\n🗂 <b>${cat}</b>\n`; lastCat = cat; }
+    txt += `• ${esc(t.title)} — <b>${fmt(t.price)} ل.س</b> (بقي ${t.slots_total - t.slots_done} تنفيذ)\n`;
+  }
+  txt += '\nللطلب روح «➕ اطلب خدمة» واكتب شو بدك 👌';
+  await send(env, uid, txt, backKb);
 }
 
 async function account(env, uid) {
@@ -233,23 +252,40 @@ async function closeTaskRefund(env, t) {
 //  ADMIN
 // ============================================================
 const adminKb = { inline_keyboard: [
-  [{ text: '🗂 التصنيفات', callback_data: 'adm:cats' }, { text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }],
+  [{ text: '📋 المهام والتصنيفات', callback_data: 'adm:grp:work' }, { text: '💰 المالية', callback_data: 'adm:grp:money' }],
+  [{ text: '👥 المستخدمين والدعم', callback_data: 'adm:grp:people' }, { text: '⚙️ النظام', callback_data: 'adm:grp:sys' }],
+]};
+const adminWorkKb = { inline_keyboard: [
+  [{ text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }, { text: '🗂 التصنيفات', callback_data: 'adm:cats' }],
   [{ text: '📥 طلبات العملاء', callback_data: 'adm:orders' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
+  [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
+]};
+const adminMoneyKb = { inline_keyboard: [
   [{ text: '💰 إيداعات معلقة', callback_data: 'adm:deps' }, { text: '💸 سحوبات معلقة', callback_data: 'adm:wds' }],
-  [{ text: '📢 قنوات الاشتراك الإجباري', callback_data: 'adm:chans' }, { text: '🆘 تذاكر الدعم', callback_data: 'adm:tickets' }],
-  [{ text: '👥 المستخدمين', callback_data: 'adm:users' }, { text: '⚙️ الإعدادات', callback_data: 'adm:settings' }],
-  [{ text: '📊 إحصائيات', callback_data: 'adm:stats' }],
+  [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
+]};
+const adminPeopleKb = { inline_keyboard: [
+  [{ text: '👥 المستخدمين', callback_data: 'adm:users' }, { text: '🆘 تذاكر الدعم', callback_data: 'adm:tickets' }],
+  [{ text: '📢 قنوات الاشتراك الإجباري', callback_data: 'adm:chans' }],
+  [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
+]};
+const adminSysKb = { inline_keyboard: [
+  [{ text: '⚙️ الإعدادات', callback_data: 'adm:settings' }, { text: '📊 إحصائيات', callback_data: 'adm:stats' }],
+  [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
 
-async function adminHome(env, uid) { await send(env, uid, '👑 <b>لوحة الأدمن</b> — كلشي من هون بينضبط:', adminKb); }
+async function adminHome(env, uid) { await send(env, uid, '👑 <b>لوحة الأدمن</b> — اختار قسم:', adminKb); }
 
 async function adminCats(env, uid) {
   const cats = await all(env, 'SELECT c.*, p.name pname FROM categories c LEFT JOIN categories p ON p.id=c.parent_id ORDER BY c.id');
   const txt = cats.length ? cats.map((c) => `• ${c.parent_id ? `↳ ${esc(c.pname)} / ` : ''}<b>${esc(c.name)}</b> (#${c.id})`).join('\n') : 'ما في تصنيفات لسا.';
   const kb = { inline_keyboard: [
-    [{ text: '➕ تصنيف رئيسي', callback_data: 'adm:addcat:0' }],
-    ...cats.map((c) => [{ text: `↳ فرعي تحت «${c.name}»`, callback_data: `adm:addcat:${c.id}` }, { text: `🗑 حذف «${c.name}»`, callback_data: `adm:delcat:${c.id}` }]),
-    [{ text: '⬅️ رجوع', callback_data: 'adm:home' }],
+    [{ text: '➕ تصنيف رئيسي', callback_data: 'adm:addcat:0' }, { text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }],
+    ...cats.flatMap((c) => [
+      [{ text: `➕ مهمة بـ «${c.name}»`, callback_data: `adm:newtask:${c.id}` }, { text: `↳ فرعي تحت «${c.name}»`, callback_data: `adm:addcat:${c.id}` }],
+      [{ text: `🗑 حذف «${c.name}»`, callback_data: `adm:delcat:${c.id}` }],
+    ]),
+    [{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }],
   ]};
   await send(env, uid, `🗂 <b>التصنيفات:</b>\n${txt}`, kb);
 }
@@ -379,7 +415,9 @@ async function publishTask(env, uid, d) {
 async function wizardStep(env, uid, st, text) {
   const d = st.data;
   const steps = {
-    tw_title:   async () => { d.title = text; await setState(env, uid, 'tw_cat', d); return pickCategory(env, uid); },
+    tw_title:   async () => { d.title = text;
+                    if (d.category_id) { await setState(env, uid, 'tw_inst', d); return send(env, uid, '📋 اكتب تعليمات التنفيذ للعامل (أو «-» إذا ما في):'); }
+                    await setState(env, uid, 'tw_cat', d); return pickCategory(env, uid); },
     tw_inst:    async () => { d.instructions = text === '-' ? '' : text; await setState(env, uid, 'tw_proof', d);
                     return send(env, uid, '📄 نوع الإثبات المطلوب:', { inline_keyboard: [[
                       { text: '🖼 صورة', callback_data: 'twp:photo' }, { text: '✍️ نص', callback_data: 'twp:text' },
@@ -548,7 +586,8 @@ async function handleMessage(env, msg) {
     case '🛠 مهامي': return myTasks(env, uid);
     case '➕ اطلب خدمة':
       await setState(env, uid, 'client_request', {});
-      return send(env, uid, '➕ <b>طلب خدمة</b>\nاكتب شو بدك بالتفصيل: نوع الشغل، العدد، وأي تفاصيل مهمة. الإدارة بتراجع طلبك وبتحولو لمهمة منشورة للعمال.');
+      return send(env, uid, '➕ <b>طلب خدمة</b>\nاكتب شو بدك بالتفصيل: نوع الشغل، العدد، وأي تفاصيل مهمة. الإدارة بتراجع طلبك وبتحولو لمهمة منشورة للعمال.\n\n💰 شوف «قائمة الأسعار» لتعرف سعر كل تنفيذ قبل ما تطلب:',
+        { inline_keyboard: [[{ text: '💰 قائمة الأسعار', callback_data: 'prices' }]] });
     case '📦 طلباتي': {
       const rows = await all(env, 'SELECT * FROM orders WHERE client_id=? ORDER BY id DESC LIMIT 10', uid);
       const myT = await all(env, "SELECT * FROM tasks WHERE client_id=? ORDER BY id DESC LIMIT 10", uid);
@@ -557,8 +596,11 @@ async function handleMessage(env, msg) {
       if (myT.length) txt += '\n\n<b>مهامك المنشورة:</b>\n' + myT.map((t) => `• «${esc(t.title)}» — ${t.slots_done}/${t.slots_total} ${t.status === 'open' ? '(شغالة)' : '(مسكرة)'}`).join('\n');
       const pending = await one(env, `SELECT COUNT(*) n FROM claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.status='submitted' AND t.reviewer='client' AND t.client_id=?`, uid);
-      const kb = pending.n ? { inline_keyboard: [[{ text: `🧾 إثباتات بانتظار مراجعتك (${pending.n})`, callback_data: 'myproofs' }]] } : backKb;
-      return send(env, uid, txt, kb);
+      const kbRows = [];
+      if (pending.n) kbRows.push([{ text: `🧾 إثباتات بانتظار مراجعتك (${pending.n})`, callback_data: 'myproofs' }]);
+      kbRows.push([{ text: '💰 قائمة الأسعار', callback_data: 'prices' }]);
+      kbRows.push([{ text: '⬅️ رجوع', callback_data: 'home' }]);
+      return send(env, uid, txt, { inline_keyboard: kbRows });
     }
     case '👛 محفظتي': return wallet(env, uid);
     case '🎁 الإحالة': return referral(env, uid);
@@ -591,7 +633,21 @@ async function handleCallback(env, cb) {
   }
   if (data === 'home') return showHome(env, uid);
   if (data === 'cats') return listCategories(env, uid);
-  if (cmd === 'cat') return listTasks(env, uid, Number(arg));
+  if (data === 'prices') return priceList(env, uid);
+  if (cmd === 'cat') {
+    const catId = Number(arg);
+    const subs = await all(env, 'SELECT * FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id', catId);
+    if (subs.length) {
+      const rows = subs.map((c) => [{ text: `🗂 ${c.name}`, callback_data: `cat:${c.id}` }]);
+      if (isAdmin(env, uid)) rows.push([{ text: '➕ ضيف مهمة بهالتصنيف', callback_data: `adm:newtask:${catId}` }]);
+      rows.push([{ text: '⬅️ رجوع للتصنيفات', callback_data: 'cats' }]);
+      await send(env, uid, '🗂 <b>تصنيفات فرعية:</b>', { inline_keyboard: rows });
+      const here = await all(env, "SELECT id FROM tasks WHERE category_id=? AND status='open' LIMIT 1", catId);
+      if (here.length) return listTasks(env, uid, catId);
+      return;
+    }
+    return listTasks(env, uid, catId);
+  }
 
   if (cmd === 'take') {
     const t = await one(env, "SELECT * FROM tasks WHERE id=? AND status='open'", Number(arg));
@@ -654,6 +710,17 @@ async function handleCallback(env, cb) {
   if (!isAdmin(env, uid)) return;
 
   if (data === 'adm:home') return adminHome(env, uid);
+  if (cmd === 'adm' && arg === 'grp') {
+    if (arg2 === 'work') return send(env, uid, '📋 <b>المهام والتصنيفات</b>', adminWorkKb);
+    if (arg2 === 'money') return send(env, uid, '💰 <b>المالية</b>', adminMoneyKb);
+    if (arg2 === 'people') return send(env, uid, '👥 <b>المستخدمين والدعم</b>', adminPeopleKb);
+    if (arg2 === 'sys') return send(env, uid, '⚙️ <b>النظام</b>', adminSysKb);
+    return;
+  }
+  if (cmd === 'adm' && arg === 'newtask' && arg2) {
+    await setState(env, uid, 'tw_title', { client_id: null, category_id: Number(arg2) });
+    return send(env, uid, '➕ <b>مهمة جديدة</b> (التصنيف محدد جاهز)\nعنوان المهمة:');
+  }
   if (data === 'adm:cats') return adminCats(env, uid);
   if (cmd === 'adm' && arg === 'addcat') { await setState(env, uid, 'adm_catname', { parent_id: Number(arg2) || null }); return send(env, uid, 'اسم التصنيف:'); }
   if (cmd === 'adm' && arg === 'delcat') {
@@ -731,10 +798,35 @@ async function scheduled(env) {
   for (const c of stale) await approveClaim(env, c);
 }
 
+// ---------- One-time schema setup (mirrors schema.sql) ----------
+// Runs through the Worker's own D1 binding: GET /__setup?key=<WEBHOOK_SECRET>
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, name TEXT DEFAULT '', username TEXT DEFAULT '', balance INTEGER NOT NULL DEFAULT 0, referrer_id INTEGER, is_banned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, name TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, client_id INTEGER, title TEXT NOT NULL, instructions TEXT DEFAULT '', proof_type TEXT NOT NULL DEFAULT 'any', price INTEGER NOT NULL DEFAULT 0, pay INTEGER NOT NULL DEFAULT 0, slots_total INTEGER NOT NULL DEFAULT 1, slots_done INTEGER NOT NULL DEFAULT 0, reviewer TEXT NOT NULL DEFAULT 'admin', status TEXT NOT NULL DEFAULT 'open', deadline TEXT DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, worker_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed', proof_text TEXT DEFAULT '', proof_file TEXT DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, submitted_at INTEGER DEFAULT 0, reviewed_at INTEGER DEFAULT 0, UNIQUE(task_id, worker_id))`,
+  `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, note TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', credited INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, details TEXT DEFAULT '', amount INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS txns (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL DEFAULT 0, ref TEXT DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS forced_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_ref TEXT NOT NULL, title TEXT DEFAULT '', link TEXT DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, ref TEXT DEFAULT '', message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS ustate (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}')`,
+  `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]')`,
+];
+
 // ---------- Entry ----------
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === '/__setup') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)
+        return new Response('forbidden', { status: 403 });
+      if (!env.DB) return new Response('DB binding missing', { status: 500 });
+      await env.DB.batch(SCHEMA_STATEMENTS.map((s) => env.DB.prepare(s)));
+      return new Response('setup ok');
+    }
     if (request.method === 'POST' && url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       const upd = await request.json().catch(() => null);
       if (upd?.message) await handleMessage(env, upd.message);

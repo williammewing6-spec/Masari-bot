@@ -224,9 +224,7 @@ async function priceList(env, uid) {
   const svcs = await all(env, `SELECT s.*, c.name cname, p.name pname FROM services s
     LEFT JOIN categories c ON c.id=s.category_id LEFT JOIN categories p ON p.id=c.parent_id
     WHERE s.is_active=1 ORDER BY c.parent_id, c.id, s.id`);
-  const kb = isAdmin(env, uid)
-    ? { inline_keyboard: [[{ text: '🛠 إدارة الأسعار', callback_data: 'adm:prices' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] }
-    : backKb;
+  const kb = backKb;
   if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', kb);
   let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر عن كل تنفيذ واحد:\n';
   let lastCat = '';
@@ -286,6 +284,7 @@ async function adminSvcView(env, uid, svcId) {
 }
 
 async function adminPrices(env, uid) {
+  if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
   const cats = await all(env, 'SELECT c.*, p.name pname FROM categories c LEFT JOIN categories p ON p.id=c.parent_id ORDER BY c.parent_id, c.id');
   const svcs = await all(env, 'SELECT * FROM services ORDER BY category_id, id');
   if (!svcs.length) return send(env, uid, '💰 <b>قائمة الأسعار</b>\n\nما في مهام/خدمات لسا — ضيفها من التصنيفات.', { inline_keyboard: [[{ text: '🗂 التصنيفات', callback_data: 'adm:cats' }], [{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });

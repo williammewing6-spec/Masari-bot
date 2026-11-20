@@ -126,24 +126,52 @@ async function gate(env, uid) {
   return false;
 }
 
-// ---------- Keyboards ----------
-const mainKb = (env, uid) => {
-  const rows = [
-    [{ text: '📋 المهام المتاحة' }, { text: '🛠 مهامي' }],
-    [{ text: '➕ اطلب خدمة' }, { text: '📦 طلباتي' }],
-    [{ text: '👛 محفظتي' }, { text: '🎁 الإحالة' }],
-    [{ text: '🆘 الدعم' }, { text: '👤 حسابي' }],
-  ];
+// ---------- Keyboards (per role: client / worker) ----------
+function roleKb(env, uid, role) {
+  const rows = role === 'worker'
+    ? [
+      [{ text: '📋 المهام المتاحة' }, { text: '🛠 مهامي' }],
+      [{ text: '👛 محفظتي' }, { text: '📄 إنشاء CV' }],
+      [{ text: '🎁 الإحالة' }, { text: '👤 حسابي' }],
+      [{ text: '🆘 الدعم' }, { text: '🔄 تبديل الدور' }],
+    ]
+    : [
+      [{ text: '➕ اطلب خدمة' }, { text: '💰 قائمة الأسعار' }],
+      [{ text: '📦 طلباتي' }, { text: '👛 محفظتي' }],
+      [{ text: '📄 إنشاء CV' }, { text: '🎁 الإحالة' }],
+      [{ text: '🆘 الدعم' }, { text: '👤 حسابي' }],
+      [{ text: '🔄 تبديل الدور' }],
+    ];
   if (isAdmin(env, uid)) rows.push([{ text: '👑 لوحة الأدمن' }]);
   return { keyboard: rows, resize_keyboard: true };
-};
+}
+async function mainKb(env, uid) {
+  const u = await getUser(env, uid);
+  return roleKb(env, uid, u?.role);
+}
+
+async function rolePick(env, uid) {
+  const txt = `👋 <b>أهلاً فيك بـ Masari</b>\n\nقبل ما نكمل، اختار انت داخل بصفتك شو — وبتقدر تبدّل بيناتهن أي وقت من «🔄 تبديل الدور»:\n\n🧑‍💼 <b>عميل</b>: عندك شغل بدك مين ينفّذو، أو بدك تشتري خدمة جاهزة من خدماتنا الثابتة (متل إنشاء سيرة ذاتية). بتشحن محفظتك وبتدفع منها، وبتشوف أسعار الخدمات بس.\n\n👷 <b>عامل</b>: بتنفّذ مهام جاهزة خطوة بخطوة، وبتاخد أجرك عن كل تنفيذ بينقبل، وبتسحب أرباحك. بتشوف أجر التنفيذ بس.\n\n📄 وخدمة <b>إنشاء CV</b> متاحة للكل.`;
+  return send(env, uid, txt, { inline_keyboard: [
+    [{ text: '🧑‍💼 أنا عميل', callback_data: 'role:client' }],
+    [{ text: '👷 أنا عامل', callback_data: 'role:worker' }],
+  ]});
+}
+
+async function cvIntro(env, uid) {
+  return send(env, uid, `📄 <b>إنشاء سيرة ذاتية (CV)</b>\nمنعملك سيرة ذاتية احترافية جاهزة للتوظيف.\n\nاختار النظام يلي بدك ياه:`, { inline_keyboard: [
+    [{ text: '📑 ATS — متوافقة مع أنظمة فرز السير', callback_data: 'cv:ats' }],
+    [{ text: '🌍 Europass — النموذج الأوروبي', callback_data: 'cv:euro' }],
+    [{ text: '⬅️ رجوع', callback_data: 'home' }],
+  ]});
+}
 const backKb = { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'home' }]] };
 const cancelKb = { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel' }]] };
 
 async function showHome(env, uid) {
   const u = await getUser(env, uid);
   const welcome = await setting(env, 'welcome_text', 'أهلا فيك بـ مصاري 💸');
-  await send(env, uid, `${esc(welcome)}\n\n👛 رصيدك: <b>${fmt(u?.balance)} ل.س</b>`, mainKb(env, uid));
+  await send(env, uid, `${esc(welcome)}\n\n👛 رصيدك: <b>${fmt(u?.balance)} ل.س</b>`, await mainKb(env, uid));
 }
 
 // ============================================================
@@ -189,8 +217,11 @@ async function myTasks(env, uid) {
 async function wallet(env, uid) {
   const u = await getUser(env, uid);
   const minW = await setting(env, 'min_withdraw', '25000');
+  const row = [];
+  if (isAdmin(env, uid) || u?.role !== 'worker') row.push({ text: '➕ إيداع', callback_data: 'dep' });
+  row.push({ text: '➖ سحب', callback_data: 'wd' });
   const kb = { inline_keyboard: [
-    [{ text: '➕ إيداع', callback_data: 'dep' }, { text: '➖ سحب', callback_data: 'wd' }],
+    row,
     [{ text: '📜 آخر الحركات', callback_data: 'history' }],
   ]};
   await send(env, uid, `👛 <b>محفظتك</b>\nالرصيد: <b>${fmt(u.balance)} ل.س</b>\nحد السحب الأدنى: ${fmt(minW)} ل.س`, kb);
@@ -668,7 +699,7 @@ async function handleStateText(env, uid, st, msg) {
     case 'client_request': {
       await run(env, 'INSERT INTO orders(client_id,text,created_at) VALUES(?,?,?)', uid, text, now());
       await clearState(env, uid);
-      await send(env, uid, '✅ وصل طلبك للإدارة. منراجعو ومننشره كمهمة، وبيوصلك إشعار.', mainKb(env, uid));
+      await send(env, uid, '✅ وصل طلبك للإدارة. منراجعو ومننشره كمهمة، وبيوصلك إشعار.', await mainKb(env, uid));
       if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `📥 طلب خدمة جديد من ${uid}:\n${esc(text)}`);
       return;
     }
@@ -680,7 +711,7 @@ async function handleStateText(env, uid, st, msg) {
       await run(env, "UPDATE claims SET status='submitted', proof_text=?, proof_file=?, submitted_at=? WHERE id=?",
         fileId ? '' : text, fileId, now(), claim.id);
       await clearState(env, uid);
-      await send(env, uid, '📤 تسلّم إثباتك — صار بانتظار المراجعة. بيوصلك إشعار بالنتيجة 👌', mainKb(env, uid));
+      await send(env, uid, '📤 تسلّم إثباتك — صار بانتظار المراجعة. بيوصلك إشعار بالنتيجة 👌', await mainKb(env, uid));
       const t = await one(env, 'SELECT * FROM tasks WHERE id=?', claim.task_id);
       const reviewerId = t.reviewer === 'client' && t.client_id ? t.client_id : env.ADMIN_ID;
       if (reviewerId) await send(env, reviewerId, `🧾 إثبات جديد بانتظار مراجعتك للمهمة «${esc(t.title)}»`);
@@ -700,7 +731,7 @@ async function handleStateText(env, uid, st, msg) {
       const r = await run(env, 'INSERT INTO deposits(user_id,method,note,amount,proof_file,created_at) VALUES(?,?,?,?,?,?)', uid, d.method, fileId ? '' : text, d.amount || 0, fileId, now());
       const depId = r.meta.last_row_id;
       await clearState(env, uid);
-      await send(env, uid, '✅ وصل طلب الإيداع للإدارة. بس يتحققوا من التحويل بينضاف لرصيدك وبيوصلك إشعار.', mainKb(env, uid));
+      await send(env, uid, '✅ وصل طلب الإيداع للإدارة. بس يتحققوا من التحويل بينضاف لرصيدك وبيوصلك إشعار.', await mainKb(env, uid));
       if (env.ADMIN_ID) {
         const cap = `💰 <b>إيداع جديد #${depId}</b>\nمن: ${uid}\nالطريقة: ${esc(d.method)}\nالمبلغ: <b>${fmt(d.amount)} ل.س</b>`;
         const kb = { inline_keyboard: [[
@@ -743,11 +774,11 @@ async function handleStateText(env, uid, st, msg) {
     }
     case 'wd_details2': {
       const u = await getUser(env, uid);
-      if (!d.amount || d.amount > u.balance) { await clearState(env, uid); return send(env, uid, '⚠️ رصيدك ما بيكفي لهالمبلغ.', mainKb(env, uid)); }
+      if (!d.amount || d.amount > u.balance) { await clearState(env, uid); return send(env, uid, '⚠️ رصيدك ما بيكفي لهالمبلغ.', await mainKb(env, uid)); }
       await addBalance(env, uid, -d.amount, 'withdraw', 'request');
       const r = await run(env, 'INSERT INTO withdrawals(user_id,method,details,amount,created_at) VALUES(?,?,?,?,?)', uid, d.method, text, d.amount, now());
       await clearState(env, uid);
-      await send(env, uid, '✅ تسجّل طلب السحب وصار عند الإدارة. بيوصلك إشعار بس يتنفذ.', mainKb(env, uid));
+      await send(env, uid, '✅ تسجّل طلب السحب وصار عند الإدارة. بيوصلك إشعار بس يتنفذ.', await mainKb(env, uid));
       if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `💸 طلب سحب جديد #${r.meta.last_row_id}: ${fmt(d.amount)} ل.س عبر «${esc(d.method)}» من ${uid}\nالتفاصيل: ${esc(text)}`);
       return;
     }
@@ -762,14 +793,14 @@ async function handleStateText(env, uid, st, msg) {
       await addBalance(env, uid, -amt, 'withdraw', 'request');
       await run(env, 'INSERT INTO withdrawals(user_id,method,details,amount,created_at) VALUES(?,?,?,?,?)', uid, d.method, d.details, amt, now());
       await clearState(env, uid);
-      await send(env, uid, '✅ تسجّل طلب السحب وصار عند الإدارة. بيوصلك إشعار بس يتنفذ.', mainKb(env, uid));
+      await send(env, uid, '✅ تسجّل طلب السحب وصار عند الإدارة. بيوصلك إشعار بس يتنفذ.', await mainKb(env, uid));
       if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `💸 طلب سحب جديد: ${fmt(amt)} ل.س من ${uid}`);
       return;
     }
     case 'support_msg': {
       await run(env, 'INSERT INTO tickets(user_id,ref,message,created_at) VALUES(?,?,?,?)', uid, d.ref || '', text, now());
       await clearState(env, uid);
-      await send(env, uid, '✅ وصلت رسالتك للدعم. منرد عليك هون بالبوت.', mainKb(env, uid));
+      await send(env, uid, '✅ وصلت رسالتك للدعم. منرد عليك هون بالبوت.', await mainKb(env, uid));
       if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `🆘 تذكرة دعم جديدة من ${uid}:\n${esc(text)}`);
       return;
     }
@@ -880,7 +911,11 @@ async function handleMessage(env, msg) {
     const m = text.match(/ref_(\d+)/);
     await ensureUser(env, msg.from, m ? Number(m[1]) : null);
     await clearState(env, uid);
-    if (await gate(env, uid)) await showHome(env, uid);
+    if (await gate(env, uid)) {
+      const me = await getUser(env, uid);
+      if (!isAdmin(env, uid) && !me?.role) return rolePick(env, uid);
+      await showHome(env, uid);
+    }
     return;
   }
   const u = await ensureUser(env, msg.from);
@@ -894,10 +929,11 @@ async function handleMessage(env, msg) {
     }
   }
   if (!(await gate(env, uid))) return;
+  if (!isAdmin(env, uid) && !u.role && text !== '🔄 تبديل الدور') return rolePick(env, uid);
 
   // Active wizard state consumes text/photo first (except menu buttons).
   const st = await getState(env, uid);
-  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن','/wallet','/balance','/tasks','/order'].includes(text);
+  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن','💰 قائمة الأسعار','📄 إنشاء CV','🔄 تبديل الدور','/wallet','/balance','/tasks','/order'].includes(text);
   if (st.state && !isMenuBtn && (text || msg.photo)) return handleStateText(env, uid, st, msg);
   if (isMenuBtn) await clearState(env, uid);
 
@@ -905,7 +941,7 @@ async function handleMessage(env, msg) {
     case '/wallet': return wallet(env, uid);
     case '/balance': {
       const me = await getUser(env, uid);
-      return send(env, uid, `💰 رصيدك الحالي: <b>${fmt(me?.balance)} ل.س</b>`, mainKb(env, uid));
+      return send(env, uid, `💰 رصيدك الحالي: <b>${fmt(me?.balance)} ل.س</b>`, await mainKb(env, uid));
     }
     case '/tasks': return listCategories(env, uid);
     case '/order': return orderIntro(env, uid);
@@ -926,6 +962,9 @@ async function handleMessage(env, msg) {
       kbRows.push([{ text: '⬅️ رجوع', callback_data: 'home' }]);
       return send(env, uid, txt, { inline_keyboard: kbRows });
     }
+    case '💰 قائمة الأسعار': return priceList(env, uid);
+    case '📄 إنشاء CV': return cvIntro(env, uid);
+    case '🔄 تبديل الدور': return rolePick(env, uid);
     case '👛 محفظتي': return wallet(env, uid);
     case '🎁 الإحالة': return referral(env, uid);
     case '👤 حسابي': return account(env, uid);
@@ -936,7 +975,7 @@ async function handleMessage(env, msg) {
       if (isAdmin(env, uid)) return adminHome(env, uid);
       return;
     default:
-      if (text) return send(env, uid, 'استخدم الأزرار تحت 👇', mainKb(env, uid));
+      if (text) return send(env, uid, 'استخدم الأزرار تحت 👇', await mainKb(env, uid));
   }
 }
 
@@ -955,8 +994,18 @@ async function handleCallback(env, cb) {
     if (await gate(env, uid)) { await send(env, uid, '✅ تمام، اشتراكك مكتمل. أهلا فيك!'); return showHome(env, uid); }
     return;
   }
+  if (data === 'role:client' || data === 'role:worker') {
+    const role = data === 'role:client' ? 'client' : 'worker';
+    await run(env, 'UPDATE users SET role=? WHERE tg_id=?', role, uid);
+    await send(env, uid, role === 'client' ? '🧑‍💼 تمام — انت بصفة <b>عميل</b>.' : '👷 تمام — انت بصفة <b>عامل</b>.');
+    return showHome(env, uid);
+  }
+  if (data === 'cv:ats' || data === 'cv:euro') {
+    const sys = data === 'cv:ats' ? 'ATS' : 'Europass';
+    return send(env, uid, `✅ اخترت نظام <b>${sys}</b>.\n📝 الخطوة الجاية: نموذج المعلومات الكاملة — عم نجهّزو وبيفتح قريباً هون.`, backKb);
+  }
   if (data === 'home') return showHome(env, uid);
-  if (data === 'cancel') { await clearState(env, uid); return send(env, uid, '❌ انلغت العملية.', mainKb(env, uid)); }
+  if (data === 'cancel') { await clearState(env, uid); return send(env, uid, '❌ انلغت العملية.', await mainKb(env, uid)); }
   if (data === 'cats') return listCategories(env, uid);
   if (data === 'prices') return priceList(env, uid);
   if (cmd === 'cat') {
@@ -1009,7 +1058,7 @@ async function handleCallback(env, cb) {
     await setState(env, uid, 'ord_desc', { service_id: svc.id });
     return send(env, uid, `🛒 <b>${esc(svc.name)}</b> — ${fmt(svc.price)} ل.س للتنفيذ\n\n✍️ اشرح المطلوب وحط الرابط برسالة وحدة:`);
   }
-  if (data === 'ordno') { await clearState(env, uid); return send(env, uid, '❌ انلغى الطلب.', mainKb(env, uid)); }
+  if (data === 'ordno') { await clearState(env, uid); return send(env, uid, '❌ انلغى الطلب.', await mainKb(env, uid)); }
   if (data === 'ordok') {
     const st = await getState(env, uid);
     if (st.state !== 'ord_confirm') return send(env, uid, '⚠️ انتهت هالجلسة. بلّش الطلب من جديد.');
@@ -1021,7 +1070,7 @@ async function handleCallback(env, cb) {
     const u = await getUser(env, uid);
     if (u.balance < total) {
       await clearState(env, uid);
-      return send(env, uid, `⚠️ <b>رصيدك ما بيكفي</b>\nالمطلوب: ${fmt(total)} ل.س — رصيدك: ${fmt(u.balance)} ل.س\nاشحن محفظتك من «👛 محفظتي ← إيداع» وارجع اطلب.`, mainKb(env, uid));
+      return send(env, uid, `⚠️ <b>رصيدك ما بيكفي</b>\nالمطلوب: ${fmt(total)} ل.س — رصيدك: ${fmt(u.balance)} ل.س\nاشحن محفظتك وارجع اطلب.`, { inline_keyboard: [[{ text: '➕ إيداع', callback_data: 'dep' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] });
     }
     await addBalance(env, uid, -total, 'escrow', 'order');
     const instructions = [svc.instructions, d.desc ? `— تفاصيل العميل:\n${d.desc}` : ''].filter(Boolean).join('\n');
@@ -1030,7 +1079,7 @@ async function handleCallback(env, cb) {
     const t = await one(env, 'SELECT * FROM tasks WHERE id=?', r.meta.last_row_id);
     await clearState(env, uid);
     const fresh = await getUser(env, uid);
-    await send(env, uid, `✅ <b>تم طلبك ونزلت المهمة #${t.id} للعمال فوراً</b>\n📌 ${esc(svc.name)} × ${d.qty}\nانخصم ${fmt(total)} ل.س — رصيدك هلأ ${fmt(fresh.balance)} ل.س\nبتوصلك إشعارات مع كل تنفيذ بينقبل 👌`, mainKb(env, uid));
+    await send(env, uid, `✅ <b>تم طلبك ونزلت المهمة #${t.id} للعمال فوراً</b>\n📌 ${esc(svc.name)} × ${d.qty}\nانخصم ${fmt(total)} ل.س — رصيدك هلأ ${fmt(fresh.balance)} ل.س\nبتوصلك إشعارات مع كل تنفيذ بينقبل 👌`, await mainKb(env, uid));
     await notifyWorkers(env, t);
     if (env.ADMIN_ID && String(env.ADMIN_ID) !== String(uid)) await send(env, env.ADMIN_ID, `🛒 طلب ذاتي جديد: «${esc(svc.name)}» × ${d.qty} من ${uid} (${fmt(total)} ل.س)`);
     return;
@@ -1274,6 +1323,7 @@ const SCHEMA_STATEMENTS = [
 const MIGRATIONS = [
   `ALTER TABLE deposits ADD COLUMN amount INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deposits ADD COLUMN proof_file TEXT DEFAULT ''`,
+  `ALTER TABLE users ADD COLUMN role TEXT DEFAULT ''`,
 ];
 
 // ---------- Entry ----------

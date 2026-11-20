@@ -86,11 +86,19 @@ async function setState(env, uid, state, data = {}) {
 const clearState = (env, uid) => setState(env, uid, '', {});
 
 // ---------- Forced subscription ----------
+function normRef(ref) {
+  // Admins often paste a full t.me link — Telegram needs @name or a numeric id.
+  let s = String(ref || '').trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^t\.me\//i, '');
+  s = s.split('/')[0].split('?')[0].trim();
+  if (s && !s.startsWith('@') && !/^-?\d+$/.test(s)) s = '@' + s;
+  return s;
+}
+
 async function missingChannels(env, uid) {
   const chans = await all(env, 'SELECT * FROM forced_channels ORDER BY id');
   const missing = [];
   for (const c of chans) {
-    const r = await tg(env, 'getChatMember', { chat_id: c.chat_ref, user_id: uid });
+    const r = await tg(env, 'getChatMember', { chat_id: normRef(c.chat_ref), user_id: uid });
     const st = r?.result?.status;
     if (!r.ok) {
       // The bot cannot verify membership (usually: it is not an admin in that
@@ -112,7 +120,7 @@ async function gate(env, uid) {
   if (isAdmin(env, uid)) return true;
   const missing = await missingChannels(env, uid);
   if (!missing.length) return true;
-  const rows = missing.map((c) => [{ text: `📢 اشترك بـ ${c.title || c.chat_ref}`, url: c.link || `https://t.me/${String(c.chat_ref).replace('@', '')}` }]);
+  const rows = missing.map((c) => [{ text: `📢 اشترك بـ ${c.title || c.chat_ref}`, url: c.link || `https://t.me/${normRef(c.chat_ref).replace('@', '')}` }]);
   rows.push([{ text: '✅ تحققت — أنا اشتركت', callback_data: 'check_sub' }]);
   await send(env, uid, '⛔ <b>لازم تشترك بالقنوات التالية أولاً لتقدر تستخدم البوت:</b>', { inline_keyboard: rows });
   return false;
@@ -723,7 +731,7 @@ async function handleStateText(env, uid, st, msg) {
       await send(env, uid, `✅ انضاف التصنيف «${esc(text)}»`);
       return adminCats(env, uid);
     }
-    case 'adm_chan_ref': d.chat_ref = text; await setState(env, uid, 'adm_chan_title', d); return send(env, uid, 'اسم القناة (يلي بيظهر للمستخدم):');
+    case 'adm_chan_ref': d.chat_ref = normRef(text); await setState(env, uid, 'adm_chan_title', d); return send(env, uid, 'اسم القناة (يلي بيظهر للمستخدم):');
     case 'adm_chan_title': d.title = text; await setState(env, uid, 'adm_chan_link', d); return send(env, uid, 'رابط القناة (https://t.me/...):');
     case 'adm_chan_link': {
       await run(env, 'INSERT INTO forced_channels(chat_ref,title,link) VALUES(?,?,?)', d.chat_ref, d.title, text);
@@ -1099,7 +1107,7 @@ async function handleCallback(env, cb) {
     return send(env, uid, '❌ انرفض السحب ورجع الرصيد.');
   }
   if (data === 'adm:chans') return adminChans(env, uid);
-  if (data === 'adm:addchan') { await setState(env, uid, 'adm_chan_ref', {}); return send(env, uid, 'معرّف القناة (@username أو الرقم):'); }
+  if (data === 'adm:addchan') { await setState(env, uid, 'adm_chan_ref', {}); return send(env, uid, 'معرّف القناة (@username أو الرقم أو رابط القناة):'); }
   if (cmd === 'adm' && arg === 'delchan') { await run(env, 'DELETE FROM forced_channels WHERE id=?', Number(arg2)); return adminChans(env, uid); }
   if (data === 'adm:tickets') {
     const rows = await all(env, "SELECT * FROM tickets WHERE status='open' ORDER BY id DESC LIMIT 10");
@@ -1167,6 +1175,18 @@ export default {
       await env.DB.batch(SCHEMA_STATEMENTS.map((s) => env.DB.prepare(s)));
       for (const m of MIGRATIONS) { try { await env.DB.prepare(m).run(); } catch (e) {} }
       return new Response('setup ok');
+    }
+    if (url.pathname === '/__chans') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)
+        return new Response('forbidden', { status: 403 });
+      const me = await tg(env, 'getMe');
+      const chans = await all(env, 'SELECT * FROM forced_channels ORDER BY id');
+      const out = [];
+      for (const c of chans) {
+        const r = await tg(env, 'getChatMember', { chat_id: normRef(c.chat_ref), user_id: me?.result?.id });
+        out.push({ id: c.id, ref: c.chat_ref, title: c.title, link: c.link, bot_check_ok: !!r.ok, bot_status: r?.result?.status || null, err: r.description || null });
+      }
+      return new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' } });
     }
     if (url.pathname === '/__whoami') {
       if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)

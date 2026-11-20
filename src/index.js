@@ -1572,7 +1572,9 @@ export default {
       const offers = await all(env, 'SELECT id,name,price FROM offers ORDER BY id');
       const purchases = await all(env, 'SELECT id,user_id,offer_name,qty,total,status,deposit_id FROM purchases ORDER BY id');
       const deposits = await all(env, 'SELECT id,user_id,amount,status,ref FROM deposits ORDER BY id');
-      return new Response(JSON.stringify({ offers, purchases, deposits }), { headers: { 'Content-Type': 'application/json' } });
+      const cvs = await all(env, 'SELECT id,user_id,system,status FROM cv_requests ORDER BY id');
+      const rate = await env.DB.prepare("SELECT value FROM settings WHERE key='usd_rate'").first();
+      return new Response(JSON.stringify({ offers, purchases, deposits, cvs, usd_rate: rate?.value ?? null }), { headers: { 'Content-Type': 'application/json' } });
     }
     if (url.pathname === '/__whoami') {
       if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)

@@ -981,7 +981,8 @@ async function handleStateText(env, uid, st, msg) {
       return adminChans(env, uid);
     }
     case 'adm_set': {
-      await setSetting(env, d.key, text);
+      const NUMKEYS = ['usd_rate', 'min_withdraw', 'ref_worker_pct', 'ref_client_pct', 'auto_approve_days'];
+      await setSetting(env, d.key, NUMKEYS.includes(d.key) ? String(parseNum(text)) : text);
       await clearState(env, uid);
       await send(env, uid, `✅ اتحدّث «${d.key}»`);
       return adminSettings(env, uid);

@@ -105,7 +105,7 @@ async function missingChannels(env, uid) {
       // channel) — keep the user blocked, but warn the admin (max 1/hour/channel).
       missing.push(c);
       const key = `chanwarn_${c.id}`;
-      const last = Number(await setting(env, key, '0'));
+      const last = parseNum(await setting(env, key, '0'));
       if (env.ADMIN_ID && now() - last > 3600) {
         await run(env, "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, String(now()));
         await send(env, env.ADMIN_ID, `⚠️ <b>تنبيه اشتراك إجباري:</b> ما عم أقدر أتحقق من الاشتراك بقناة «${esc(c.title || c.chat_ref)}» — غالباً لأنو البوت مش أدمن فيها. ضيف @masari1bot أدمن بالقناة، وإلا المستخدمين بيضلوا واقفين عند بوابة الاشتراك.`);
@@ -419,14 +419,14 @@ async function approveClaim(env, claim) {
   let commission = Math.max(0, t.price - t.pay);
   const worker = await getUser(env, claim.worker_id);
   if (worker?.referrer_id) {
-    const pct = Number(await setting(env, 'ref_worker_pct', '5'));
+    const pct = parseNum(await setting(env, 'ref_worker_pct', '5'));
     const amt = Math.min(commission, Math.floor((t.pay * pct) / 100));
     if (amt > 0) { await addBalance(env, worker.referrer_id, amt, 'referral', `task:${t.id}`); commission -= amt; }
   }
   if (t.client_id) {
     const client = await getUser(env, t.client_id);
     if (client?.referrer_id) {
-      const pct = Number(await setting(env, 'ref_client_pct', '10'));
+      const pct = parseNum(await setting(env, 'ref_client_pct', '10'));
       const amt = Math.min(commission, Math.floor((t.price * pct) / 100));
       if (amt > 0) { await addBalance(env, client.referrer_id, amt, 'referral', `task:${t.id}`); commission -= amt; }
     }
@@ -633,7 +633,7 @@ async function adminSettings(env, uid) {
 const isUsdtMethod = (name) => /usdt|tether|تيثر|دولار/i.test(name || '');
 async function usdtLine(env, totalSyp, methodName) {
   if (!isUsdtMethod(methodName)) return '';
-  const rate = Number(await setting(env, 'usd_rate', '0'));
+  const rate = parseNum(await setting(env, 'usd_rate', '0'));
   if (!rate || rate <= 0) return '';
   const usd = Math.ceil((totalSyp / rate) * 100) / 100;
   return `\n💵 يعني <b>${usd} USDT</b> (بسعر صرف ${fmt(rate)} ل.س/$)`;
@@ -890,7 +890,7 @@ async function handleStateText(env, uid, st, msg) {
     case 'wd_amount2': {
       const amt = parseNum(text);
       const u = await getUser(env, uid);
-      const minW = Number(await setting(env, 'min_withdraw', '25000'));
+      const minW = parseNum(await setting(env, 'min_withdraw', '25000'));
       if (!amt || amt < minW) return send(env, uid, `⚠️ الحد الأدنى للسحب ${fmt(minW)} ل.س — ابعت مبلغ صحيح:`, cancelKb);
       if (amt > u.balance) return send(env, uid, `⚠️ المبلغ أكبر من رصيدك (${fmt(u.balance)} ل.س) — ابعت مبلغ أصغر:`, cancelKb);
       d.amount = amt; await setState(env, uid, 'wd_details2', d);
@@ -913,7 +913,7 @@ async function handleStateText(env, uid, st, msg) {
     case 'wd_amount': {
       const amt = parseNum(text);
       const u = await getUser(env, uid);
-      const minW = Number(await setting(env, 'min_withdraw', '25000'));
+      const minW = parseNum(await setting(env, 'min_withdraw', '25000'));
       if (amt < minW) { await send(env, uid, `⚠️ الحد الأدنى للسحب ${fmt(minW)} ل.س`); return; }
       if (amt > u.balance) { await send(env, uid, '⚠️ المبلغ أكبر من رصيدك.'); return; }
       await addBalance(env, uid, -amt, 'withdraw', 'request');
@@ -1284,7 +1284,7 @@ async function handleCallback(env, cb) {
     const mm = methods[Number(arg)];
     if (!mm) return;
     await setState(env, uid, 'wd_amount2', { method: mm.name });
-    const minW = Number(await setting(env, 'min_withdraw', '25000'));
+    const minW = parseNum(await setting(env, 'min_withdraw', '25000'));
     return send(env, uid, `💸 <b>${esc(mm.name)}</b>\n💰 كم المبلغ يلي بدك تسحبو؟ (ل.س) — الحد الأدنى ${fmt(minW)} ل.س`, cancelKb);
   }
 
@@ -1490,7 +1490,7 @@ async function handleCallback(env, cb) {
 
 // ---------- Scheduled: auto-approve stale client-reviewed proofs ----------
 async function scheduled(env) {
-  const days = Number(await setting(env, 'auto_approve_days', '3'));
+  const days = parseNum(await setting(env, 'auto_approve_days', '3'));
   const cutoff = now() - days * 86400;
   const stale = await all(env, `SELECT c.* FROM claims c JOIN tasks t ON t.id=c.task_id
     WHERE c.status='submitted' AND t.reviewer='client' AND c.submitted_at>0 AND c.submitted_at<?`, cutoff);

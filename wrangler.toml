@@ -1,0 +1,14 @@
+name = "masari-bot"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# BOT_TOKEN is a secret:  wrangler secret put BOT_TOKEN
+# ADMIN_ID is the owner's Telegram numeric id (set after first /start).
+
+[[d1_databases]]
+binding = "DB"
+database_name = "masari-db"
+database_id = "REPLACE_AFTER_CREATE"
+
+[triggers]
+crons = ["17 * * * *"]   # hourly: auto-approve stale client-reviewed proofs

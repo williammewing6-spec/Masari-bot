@@ -989,6 +989,12 @@ export default {
       await env.DB.batch(SCHEMA_STATEMENTS.map((s) => env.DB.prepare(s)));
       return new Response('setup ok');
     }
+    if (url.pathname === '/__whoami') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)
+        return new Response('forbidden', { status: 403 });
+      const me = await tg(env, 'getMe');
+      return new Response(JSON.stringify({ ok: me.ok, id: me?.result?.id || null, username: me?.result?.username || null, description: me.description || null }), { headers: { 'Content-Type': 'application/json' } });
+    }
     if (request.method === 'POST' && url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       const upd = await request.json().catch(() => null);
       if (upd?.message) await handleMessage(env, upd.message);

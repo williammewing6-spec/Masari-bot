@@ -92,7 +92,18 @@ async function missingChannels(env, uid) {
   for (const c of chans) {
     const r = await tg(env, 'getChatMember', { chat_id: c.chat_ref, user_id: uid });
     const st = r?.result?.status;
-    if (!r.ok || ['left', 'kicked'].includes(st)) missing.push(c);
+    if (!r.ok) {
+      // The bot cannot verify membership (usually: it is not an admin in that
+      // channel) — keep the user blocked, but warn the admin (max 1/hour/channel).
+      missing.push(c);
+      const key = `chanwarn_${c.id}`;
+      const last = Number(await setting(env, key, '0'));
+      if (env.ADMIN_ID && now() - last > 3600) {
+        await run(env, "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, String(now()));
+        await send(env, env.ADMIN_ID, `⚠️ <b>تنبيه اشتراك إجباري:</b> ما عم أقدر أتحقق من الاشتراك بقناة «${esc(c.title || c.chat_ref)}» — غالباً لأنو البوت مش أدمن فيها. ضيف @masari1bot أدمن بالقناة، وإلا المستخدمين بيضلوا واقفين عند بوابة الاشتراك.`);
+      }
+    }
+    else if (['left', 'kicked'].includes(st)) missing.push(c);
   }
   return missing;
 }

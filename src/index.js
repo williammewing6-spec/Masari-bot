@@ -322,7 +322,7 @@ async function adminOffers(env, uid) {
     kb.push([{ text: `✏️ سعر «${o.name}»`, callback_data: `adm:ofrprice:${o.id}` }, { text: `✏️ شرح «${o.name}»`, callback_data: `adm:ofrdet:${o.id}` }]);
     kb.push([{ text: `🗑 حذف «${o.name}»`, callback_data: `adm:delofr:${o.id}` }]);
   }
-  kb.push([{ text: '➕ إضافة خدمة ثابتة', callback_data: 'adm:addofr' }]);
+  kb.push([{ text: '➕ إضافة تصنيف (خدمة ثابتة)', callback_data: 'adm:addofr' }]);
   kb.push([{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]);
   return send(env, uid, txt, { inline_keyboard: kb });
 }
@@ -466,7 +466,8 @@ const adminWorkKb = { inline_keyboard: [
   [{ text: '🗂 التصنيفات والمهام', callback_data: 'adm:cats' }],
   [{ text: '💰 إدارة الأسعار', callback_data: 'adm:prices' }, { text: '🧾 مشتريات العملاء', callback_data: 'adm:buys' }],
   [{ text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
-  [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }],
+  [{ text: '➕ إضافة تصنيف (قائمة الأسعار)', callback_data: 'adm:addofr' }],
+  [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }, { text: '📄 طلبات السيرة', callback_data: 'adm:cvs' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
 const adminMoneyKb = { inline_keyboard: [
@@ -616,7 +617,7 @@ async function adminChans(env, uid) {
 }
 
 async function adminSettings(env, uid) {
-  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days'];
+  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days', 'usd_rate'];
   const vals = {};
   for (const k of keys) vals[k] = await setting(env, k, '');
   const kb = { inline_keyboard: [
@@ -626,7 +627,32 @@ async function adminSettings(env, uid) {
     [{ text: '⬅️ رجوع', callback_data: 'adm:home' }],
   ]};
   await send(env, uid,
-    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم`, kb);
+    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم\n• سعر صرف الدولار (usd_rate): ${vals.usd_rate ? fmt(vals.usd_rate) + ' ل.س' : 'غير محدد — حددو كرمال حساب USDT'}`, kb);
+}
+
+const isUsdtMethod = (name) => /usdt|tether|تيثر|دولار/i.test(name || '');
+async function usdtLine(env, totalSyp, methodName) {
+  if (!isUsdtMethod(methodName)) return '';
+  const rate = Number(await setting(env, 'usd_rate', '0'));
+  if (!rate || rate <= 0) return '';
+  const usd = Math.ceil((totalSyp / rate) * 100) / 100;
+  return `\n💵 يعني <b>${usd} USDT</b> (بسعر صرف ${fmt(rate)} ل.س/$)`;
+}
+
+function cvRequestText(id, uid, d) {
+  const L = (k, v) => (v ? `\n• ${k}: ${esc(v)}` : '');
+  return `📄 <b>طلب إنشاء سيرة #${id}</b>\nالنظام: <b>${esc(d.system || '')}</b>\nمن: ${uid}${L('الاسم', d.name)}${L('المسمى', d.title)}${L('الهاتف', d.phone)}${L('الإيميل', d.email)}${L('المدينة', d.city)}${L('نبذة', d.summary)}${L('الخبرات', d.exp)}${L('التعليم', d.edu)}${L('المهارات', d.skills)}${L('اللغات', d.langs)}${L('روابط', d.links)}`;
+}
+
+async function adminCvs(env, uid) {
+  if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+  const rows = await all(env, "SELECT * FROM cv_requests WHERE status='new' ORDER BY id DESC LIMIT 10");
+  if (!rows.length) return send(env, uid, '📄 ما في طلبات سيرة جديدة.', { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
+  for (const r of rows) {
+    let d = {}; try { d = JSON.parse(r.data || '{}'); } catch (e) {}
+    await send(env, uid, cvRequestText(r.id, r.user_id, d), { inline_keyboard: [[{ text: '✔️ تم إنجازها', callback_data: `adm:cvdone:${r.id}` }]] });
+  }
+  return send(env, uid, '📄 طلبات السيرة الجديدة 👆', { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
 }
 
 async function adminStats(env, uid) {
@@ -790,7 +816,7 @@ async function handleStateText(env, uid, st, msg) {
       await clearState(env, uid);
       await send(env, uid, '✅ وصل إثبات الدفع للإدارة. بس يعتمدوه بيتم شراؤك وبيوصلك إشعار.', await mainKb(env, uid));
       if (env.ADMIN_ID) {
-        const cap = `💰 <b>إيداع لشراء #${depId}</b>\n🧾 الشراء: ${esc(p.offer_name)} × ${p.qty} = <b>${fmt(p.total)} ل.س</b>\nمن: ${uid}\nالطريقة: ${esc(d.method)}\nباعتمادك هالإيداع بيتم الشراء لحالو (ما بينضاف للرصيد).`;
+        const cap = `💰 <b>إيداع لشراء #${depId}</b>\n🧾 الشراء: ${esc(p.offer_name)} × ${p.qty} = <b>${fmt(p.total)} ل.س</b>${await usdtLine(env, p.total, d.method)}\nمن: ${uid}\nالطريقة: ${esc(d.method)}\nباعتمادك هالإيداع بيتم الشراء لحالو (ما بينضاف للرصيد).`;
         const kb = { inline_keyboard: [[
           { text: `✅ اعتماد ${fmt(p.total)} ل.س`, callback_data: `adm:depok:${depId}` },
           { text: '❌ رفض', callback_data: `adm:deprej:${depId}` },
@@ -798,6 +824,25 @@ async function handleStateText(env, uid, st, msg) {
         if (fileId) await tg(env, 'sendPhoto', { chat_id: env.ADMIN_ID, photo: fileId, caption: cap, parse_mode: 'HTML', reply_markup: kb });
         else await send(env, env.ADMIN_ID, `${cap}\nرقم العملية: ${esc(text)}`, kb);
       }
+      return;
+    }
+    case 'cv_name': d.name = text; await setState(env, uid, 'cv_title', d); return send(env, uid, '٢) المسمى الوظيفي (مثلا: محاسب / مبرمج / مهندس اتصالات):', cancelKb);
+    case 'cv_title': d.title = text; await setState(env, uid, 'cv_phone', d); return send(env, uid, '٣) رقم الهاتف (مع رمز البلد إذا برا سوريا):', cancelKb);
+    case 'cv_phone': d.phone = text; await setState(env, uid, 'cv_email', d); return send(env, uid, '٤) البريد الإلكتروني:', cancelKb);
+    case 'cv_email': d.email = text; await setState(env, uid, 'cv_city', d); return send(env, uid, '٥) المدينة والبلد:', cancelKb);
+    case 'cv_city': d.city = text; await setState(env, uid, 'cv_summary', d); return send(env, uid, '٦) نبذة قصيرة عنك (اختياري — «-» للتخطي):', cancelKb);
+    case 'cv_summary': d.summary = text === '-' ? '' : text; await setState(env, uid, 'cv_exp', d); return send(env, uid, '٧) الخبرات العملية — كل خبرة بسطر: الجهة — المنصب — من سنة لسنة (اختياري):', cancelKb);
+    case 'cv_exp': d.exp = text === '-' ? '' : text; await setState(env, uid, 'cv_edu', d); return send(env, uid, '٨) التعليم — الجامعة/المعهد — الاختصاص — سنة التخرج (اختياري):', cancelKb);
+    case 'cv_edu': d.edu = text === '-' ? '' : text; await setState(env, uid, 'cv_skills', d); return send(env, uid, '٩) المهارات (افصل بيناتهن بفاصلة):', cancelKb);
+    case 'cv_skills': d.skills = text; await setState(env, uid, 'cv_langs', d); return send(env, uid, '١٠) اللغات ومستواك فيهن — مثلا: عربي أم، إنكليزي جيد (اختياري):', cancelKb);
+    case 'cv_langs': d.langs = text === '-' ? '' : text; await setState(env, uid, 'cv_links', d); return send(env, uid, '١١) روابط — LinkedIn أو أعمالك (اختياري):', cancelKb);
+    case 'cv_links': {
+      d.links = text === '-' ? '' : text;
+      const r = await run(env, 'INSERT INTO cv_requests(user_id,system,data,created_at) VALUES(?,?,?,?)', uid, d.system || '', JSON.stringify(d), now());
+      const id = r.meta.last_row_id;
+      await clearState(env, uid);
+      await send(env, uid, `✅ <b>وصل طلب السيرة #${id}!</b>\nالنظام: ${esc(d.system || '')}\nالإدارة استلمت معلوماتك وبتبلش بالشغل — بيوصلك إشعار بس تجهز 👌`, await mainKb(env, uid));
+      if (env.ADMIN_ID) await send(env, env.ADMIN_ID, cvRequestText(id, uid, d), { inline_keyboard: [[{ text: '✔️ تم إنجازها', callback_data: `adm:cvdone:${id}` }]] });
       return;
     }
     case 'ofr_name': d.name = text; await setState(env, uid, 'ofr_details', d); return send(env, uid, '📝 ابعت شرح الخدمة (يلي بيشوفو العميل قبل الشراء) — أو «-» إذا ما في:', cancelKb);
@@ -1085,7 +1130,8 @@ async function handleCallback(env, cb) {
   }
   if (data === 'cv:ats' || data === 'cv:euro') {
     const sys = data === 'cv:ats' ? 'ATS' : 'Europass';
-    return send(env, uid, `✅ اخترت نظام <b>${sys}</b>.\n📝 الخطوة الجاية: نموذج المعلومات الكاملة — عم نجهّزو وبيفتح قريباً هون.`, backKb);
+    await setState(env, uid, 'cv_name', { system: sys });
+    return send(env, uid, `📄 <b>إنشاء سيرة ذاتية — نظام ${sys}</b>\nمناخد معلوماتك خطوة بخطوة (اكتب «-» لتخطي أي خانة اختيارية).\n\n١) الاسم الكامل:`, cancelKb);
   }
   if (data === 'home') return showHome(env, uid);
   if (data === 'cancel') { await clearState(env, uid); return send(env, uid, '❌ انلغت العملية.', await mainKb(env, uid)); }
@@ -1116,7 +1162,7 @@ async function handleCallback(env, cb) {
     const mm = methods[Number(arg2)];
     if (!mm) return;
     await setState(env, uid, 'ofr_shot', { purchase_id: p.id, method: mm.name });
-    return send(env, uid, `💳 حوّل <b>${fmt(p.total)} ل.س</b> عبر «${esc(mm.name)}» لهون:\n${esc(mm.details || '')}\n\n📸 بعد ما تحوّل، ابعت <b>سكرين شوت</b> التحويل هون (أو رقم العملية كنص).`, cancelKb);
+    return send(env, uid, `💳 حوّل <b>${fmt(p.total)} ل.س</b> عبر «${esc(mm.name)}» لهون:\n${esc(mm.details || '')}${await usdtLine(env, p.total, mm.name)}\n\n📸 بعد ما تحوّل، ابعت <b>سكرين شوت</b> التحويل هون (أو رقم العملية كنص).`, cancelKb);
   }
   if (cmd === 'ofrcancel') {
     await run(env, "UPDATE purchases SET status='cancelled' WHERE id=? AND user_id=? AND status='awaiting_payment'", Number(arg), uid);
@@ -1283,6 +1329,12 @@ async function handleCallback(env, cb) {
   }
   if (data === 'adm:prices') return adminOffers(env, uid);
   if (data === 'adm:buys') return adminBuys(env, uid);
+  if (data === 'adm:cvs') return adminCvs(env, uid);
+  if (cmd === 'adm' && arg === 'cvdone') {
+    const r = await one(env, "SELECT * FROM cv_requests WHERE id=? AND status='new'", Number(arg2));
+    if (r) { await run(env, "UPDATE cv_requests SET status='done' WHERE id=?", r.id); await send(env, r.user_id, `📄 <b>سيرتك الذاتية جاهزة!</b>\nاكتمل طلب السيرة #${r.id} ✅ — تواصل مع الدعم لاستلامها.`); return send(env, uid, '✔️ تسجل كمُنجز.'); }
+    return send(env, uid, 'هالطلب انحسم من قبل.');
+  }
   if (data === 'adm:addofr') { await setState(env, uid, 'ofr_name', {}); return send(env, uid, '🛒 اسم الخدمة الثابتة (متل ما بيشوفها العميل بقائمة الأسعار):', cancelKb); }
   if (cmd === 'adm' && arg === 'ofrprice') { await setState(env, uid, 'adm_ofr_price', { offer_id: Number(arg2) }); return send(env, uid, '✏️ ابعت السعر الجديد للوحدة (ل.س):', cancelKb); }
   if (cmd === 'adm' && arg === 'ofrdet') { await setState(env, uid, 'adm_ofr_details', { offer_id: Number(arg2) }); return send(env, uid, '✏️ ابعت الشرح الجديد (أو «-» لمسحو):', cancelKb); }
@@ -1463,6 +1515,7 @@ const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS ustate (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}')`,
   `CREATE TABLE IF NOT EXISTS offers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, details TEXT DEFAULT '', price INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, offer_id INTEGER, offer_name TEXT DEFAULT '', qty INTEGER NOT NULL DEFAULT 1, total INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'awaiting_payment', deposit_id INTEGER, created_at INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS cv_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, system TEXT DEFAULT '', data TEXT DEFAULT '{}', status TEXT NOT NULL DEFAULT 'new', created_at INTEGER NOT NULL DEFAULT 0)`,
   `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]')`,
 ];
 

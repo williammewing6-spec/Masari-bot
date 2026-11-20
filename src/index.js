@@ -7,6 +7,12 @@
 
 const now = () => Math.floor(Date.now() / 1000);
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+// Accepts Arabic-Indic digits (١٢٣) too — users type them all the time.
+const parseNum = (s) => {
+  const t = String(s ?? '').replace(/[٠-٩]/g, (c) => '٠١٢٣٤٥٦٧٨٩'.indexOf(c)).replace(/[^0-9-]/g, '');
+  const n = parseInt(t, 10);
+  return Number.isFinite(n) ? n : 0;
+};
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // ---------- Telegram API ----------
@@ -177,21 +183,40 @@ async function referral(env, uid) {
     `👥 إحالاتك: ${count.n} شخص\n💰 مجموع أرباحك من الإحالة: ${fmt(earned.s)} ل.س\n\n🔗 رابطك:\n${link}`, backKb);
 }
 
-// ---------- Client price list (client-facing prices only) ----------
+// ---------- Client price list (services, client-facing prices only) ----------
 async function priceList(env, uid) {
-  const tasks = await all(env, `SELECT t.*, c.name cname, p.name pname FROM tasks t
-    LEFT JOIN categories c ON c.id=t.category_id LEFT JOIN categories p ON p.id=c.parent_id
-    WHERE t.status='open' ORDER BY c.parent_id, c.id, t.id`);
-  if (!tasks.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', backKb);
-  let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر محسوب عن كل تنفيذ واحد:\n';
+  const svcs = await all(env, `SELECT s.*, c.name cname, p.name pname FROM services s
+    LEFT JOIN categories c ON c.id=s.category_id LEFT JOIN categories p ON p.id=c.parent_id
+    WHERE s.is_active=1 ORDER BY c.parent_id, c.id, s.id`);
+  if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', backKb);
+  let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر عن كل تنفيذ واحد:\n';
   let lastCat = '';
-  for (const t of tasks) {
-    const cat = `${t.pname ? esc(t.pname) + ' / ' : ''}${esc(t.cname || 'بدون تصنيف')}`;
+  for (const s of svcs) {
+    const cat = `${s.pname ? esc(s.pname) + ' / ' : ''}${esc(s.cname || 'بدون تصنيف')}`;
     if (cat !== lastCat) { txt += `\n🗂 <b>${cat}</b>\n`; lastCat = cat; }
-    txt += `• ${esc(t.title)} — <b>${fmt(t.price)} ل.س</b> (بقي ${t.slots_total - t.slots_done} تنفيذ)\n`;
+    txt += `• ${esc(s.name)} — <b>${fmt(s.price)} ل.س</b>\n`;
   }
-  txt += '\nللطلب روح «➕ اطلب خدمة» واكتب شو بدك 👌';
+  txt += '\nللطلب روح «➕ اطلب خدمة» واختار من القائمة 👌';
   await send(env, uid, txt, backKb);
+}
+
+// ---------- Client self-serve ordering ----------
+async function orderCategories(env, uid, parentId = null) {
+  const cats = parentId
+    ? await all(env, 'SELECT * FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id', parentId)
+    : await all(env, 'SELECT * FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id');
+  if (!cats.length) return send(env, uid, '🛒 ما في تصنيفات لسا. جرّب «طلب خاص» أو راجع الدعم.', backKb);
+  const rows = cats.map((c) => [{ text: `🗂 ${c.name}`, callback_data: `ordcat:${c.id}` }]);
+  if (parentId) rows.push([{ text: '⬅️ رجوع للتصنيفات', callback_data: 'ordcats' }]);
+  await send(env, uid, '🛒 <b>اختار التصنيف:</b>', { inline_keyboard: rows });
+}
+
+async function orderServices(env, uid, catId) {
+  const svcs = await all(env, 'SELECT * FROM services WHERE category_id=? AND is_active=1 ORDER BY id', catId);
+  if (!svcs.length) return send(env, uid, 'ما في خدمات بهالتصنيف لسا. جرّب تصنيف تاني أو «طلب خاص».', backKb);
+  const rows = svcs.map((s) => [{ text: `${s.name} — ${fmt(s.price)} ل.س`, callback_data: `ordsel:${s.id}` }]);
+  rows.push([{ text: '⬅️ رجوع', callback_data: 'ordcats' }]);
+  await send(env, uid, '🛒 <b>اختار الخدمة</b> (السعر عن كل تنفيذ واحد):', { inline_keyboard: rows });
 }
 
 async function account(env, uid) {
@@ -257,7 +282,8 @@ const adminKb = { inline_keyboard: [
 ]};
 const adminWorkKb = { inline_keyboard: [
   [{ text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }, { text: '🗂 التصنيفات', callback_data: 'adm:cats' }],
-  [{ text: '📥 طلبات العملاء', callback_data: 'adm:orders' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
+  [{ text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
+  [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
 const adminMoneyKb = { inline_keyboard: [
@@ -282,12 +308,36 @@ async function adminCats(env, uid) {
   const kb = { inline_keyboard: [
     [{ text: '➕ تصنيف رئيسي', callback_data: 'adm:addcat:0' }, { text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }],
     ...cats.flatMap((c) => [
-      [{ text: `➕ مهمة بـ «${c.name}»`, callback_data: `adm:newtask:${c.id}` }, { text: `↳ فرعي تحت «${c.name}»`, callback_data: `adm:addcat:${c.id}` }],
-      [{ text: `🗑 حذف «${c.name}»`, callback_data: `adm:delcat:${c.id}` }],
+      [{ text: `🛠 خدمات «${c.name}»`, callback_data: `adm:svcs:${c.id}` }, { text: `➕ مهمة بـ «${c.name}»`, callback_data: `adm:newtask:${c.id}` }],
+      [{ text: `↳ فرعي تحت «${c.name}»`, callback_data: `adm:addcat:${c.id}` }, { text: `🗑 حذف «${c.name}»`, callback_data: `adm:delcat:${c.id}` }],
     ]),
     [{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }],
   ]};
   await send(env, uid, `🗂 <b>التصنيفات:</b>\n${txt}`, kb);
+}
+
+async function adminSvcs(env, uid, catId) {
+  const cat = await one(env, 'SELECT * FROM categories WHERE id=?', catId);
+  const svcs = await all(env, 'SELECT * FROM services WHERE category_id=? ORDER BY id', catId);
+  const txt = svcs.length
+    ? svcs.map((s) => `• <b>${esc(s.name)}</b> — عميل ${fmt(s.price)} / عامل ${fmt(s.pay)} ل.س`).join('\n')
+    : 'ما في خدمات بهالتصنيف لسا.';
+  const kb = { inline_keyboard: [
+    [{ text: '➕ خدمة جديدة هون', callback_data: `adm:addsvc:${catId}` }],
+    ...svcs.map((s) => [{ text: `🗑 حذف «${s.name}»`, callback_data: `adm:delsvc:${s.id}:${catId}` }]),
+    [{ text: '⬅️ رجوع للتصنيفات', callback_data: 'adm:cats' }],
+  ]};
+  await send(env, uid, `🛠 <b>خدمات «${esc(cat?.name || '')}»:</b>\n${txt}`, kb);
+}
+
+async function adminTasks(env, uid) {
+  const rows = await all(env, `SELECT t.*, c.name cname FROM tasks t LEFT JOIN categories c ON c.id=t.category_id
+    WHERE t.status='open' ORDER BY t.id DESC LIMIT 20`);
+  if (!rows.length) return send(env, uid, '🗂 ما في مهام مفتوحة.', adminWorkKb);
+  for (const t of rows) {
+    await send(env, uid, `📌 <b>#${t.id} ${esc(t.title)}</b>\n🗂 ${esc(t.cname || '—')} — التقدم ${t.slots_done}/${t.slots_total}\n💰 سعر ${fmt(t.price)} / أجر ${fmt(t.pay)} ل.س\n${t.client_id ? `🧑‍💼 عميل ممول: ${t.client_id}` : '👑 ممولة من الإدارة'}`,
+      { inline_keyboard: [[{ text: '🔒 إغلاق (واسترجاع الباقي للعميل)', callback_data: `adm:closetask:${t.id}` }]] });
+  }
 }
 
 async function adminOrders(env, uid) {
@@ -422,9 +472,9 @@ async function wizardStep(env, uid, st, text) {
                     return send(env, uid, '📄 نوع الإثبات المطلوب:', { inline_keyboard: [[
                       { text: '🖼 صورة', callback_data: 'twp:photo' }, { text: '✍️ نص', callback_data: 'twp:text' },
                       { text: '🔗 رابط', callback_data: 'twp:link' }, { text: 'أي شي', callback_data: 'twp:any' }]] }); },
-    tw_price:   async () => { d.price = parseInt(text) || 0; await setState(env, uid, 'tw_pay', d); return send(env, uid, '💵 أجر العامل على التنفيذ الواحد؟ (ل.س)'); },
-    tw_pay:     async () => { d.pay = parseInt(text) || 0; await setState(env, uid, 'tw_slots', d); return send(env, uid, '🎯 كم تنفيذ بدك بالمجموع؟ (عدد الخانات)'); },
-    tw_slots:   async () => { d.slots = Math.max(1, parseInt(text) || 1); await setState(env, uid, 'tw_rev', d);
+    tw_price:   async () => { d.price = parseNum(text); await setState(env, uid, 'tw_pay', d); return send(env, uid, '💵 أجر العامل على التنفيذ الواحد؟ (ل.س)'); },
+    tw_pay:     async () => { d.pay = parseNum(text); await setState(env, uid, 'tw_slots', d); return send(env, uid, '🎯 كم تنفيذ بدك بالمجموع؟ (عدد الخانات)'); },
+    tw_slots:   async () => { d.slots = Math.max(1, parseNum(text)); await setState(env, uid, 'tw_rev', d);
                     return send(env, uid, '👁 مين بيراجع الإثباتات؟', { inline_keyboard: [[
                       { text: '👑 أنا (الأدمن)', callback_data: 'twr:admin' }, { text: '🧑‍💼 العميل صاحب الطلب', callback_data: 'twr:client' }]] }); },
     tw_dead:    async () => { d.deadline = text === '-' ? '' : text; await clearState(env, uid); return publishTask(env, uid, d); },
@@ -478,7 +528,7 @@ async function handleStateText(env, uid, st, msg) {
     case 'wd_method': d.method = text; await setState(env, uid, 'wd_details', d); return send(env, uid, '📍 ابعت الرقم/العنوان يلي بدك التحويل عليه:');
     case 'wd_details': d.details = text; await setState(env, uid, 'wd_amount', d); return send(env, uid, '💸 كم المبلغ؟ (ل.س)');
     case 'wd_amount': {
-      const amt = parseInt(text) || 0;
+      const amt = parseNum(text);
       const u = await getUser(env, uid);
       const minW = Number(await setting(env, 'min_withdraw', '25000'));
       if (amt < minW) { await send(env, uid, `⚠️ الحد الأدنى للسحب ${fmt(minW)} ل.س`); return; }
@@ -496,6 +546,37 @@ async function handleStateText(env, uid, st, msg) {
       await send(env, uid, '✅ وصلت رسالتك للدعم. منرد عليك هون بالبوت.', mainKb(env, uid));
       if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `🆘 تذكرة دعم جديدة من ${uid}:\n${esc(text)}`);
       return;
+    }
+    // ----- Service definition wizard (admin) -----
+    case 'svc_name': d.name = text; await setState(env, uid, 'svc_price', d); return send(env, uid, '💰 سعر التنفيذ على العميل؟ (ل.س)');
+    case 'svc_price': d.price = parseNum(text); await setState(env, uid, 'svc_pay', d); return send(env, uid, '💵 أجر العامل على التنفيذ الواحد؟ (ل.س)');
+    case 'svc_pay': d.pay = parseNum(text); await setState(env, uid, 'svc_proof', d);
+      return send(env, uid, '📄 نوع الإثبات المطلوب من العامل:', { inline_keyboard: [[
+        { text: '🖼 صورة', callback_data: 'svp:photo' }, { text: '✍️ نص', callback_data: 'svp:text' },
+        { text: '🔗 رابط', callback_data: 'svp:link' }, { text: 'أي شي', callback_data: 'svp:any' }]] });
+    case 'svc_inst': {
+      await run(env, 'INSERT INTO services(category_id,name,price,pay,proof_type,reviewer,instructions) VALUES(?,?,?,?,?,?,?)',
+        d.category_id, d.name, d.price, d.pay, d.proof_type, d.reviewer, text === '-' ? '' : text);
+      const catId = d.category_id;
+      await clearState(env, uid);
+      await send(env, uid, `✅ انضافت الخدمة «${esc(d.name)}» — العميل بيقدر يطلبها لحالو هلأ.`);
+      return adminSvcs(env, uid, catId);
+    }
+    // ----- Client self-serve order -----
+    case 'ord_desc': d.desc = text; await setState(env, uid, 'ord_qty', d); return send(env, uid, '🔢 كم شخص/تنفيذ بدك؟ (اكتب الرقم بس)');
+    case 'ord_qty': {
+      const qty = parseNum(text);
+      if (qty < 1) return send(env, uid, '⚠️ اكتب عدد صحيح أكبر من صفر.');
+      const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', d.service_id);
+      if (!svc) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.'); }
+      d.qty = qty; d.total = svc.price * qty;
+      await setState(env, uid, 'ord_confirm', d);
+      const u = await getUser(env, uid);
+      return send(env, uid,
+        `🧾 <b>ملخص الطلب</b>\nالخدمة: ${esc(svc.name)}\nالسعر للتنفيذ: ${fmt(svc.price)} ل.س\nالعدد: ${qty}\n<b>المجموع: ${fmt(d.total)} ل.س</b>\nرصيدك الحالي: ${fmt(u.balance)} ل.س`,
+        { inline_keyboard: [[
+          { text: '✅ تأكيد وخصم من رصيدي', callback_data: 'ordok' },
+          { text: '❌ إلغاء', callback_data: 'ordno' }]] });
     }
     case 'adm_catname': {
       await run(env, 'INSERT INTO categories(parent_id,name) VALUES(?,?)', d.parent_id || null, text);
@@ -520,7 +601,7 @@ async function handleStateText(env, uid, st, msg) {
     case 'adm_dep_amount': {
       const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', d.dep_id);
       if (dep && dep.status === 'pending') {
-        const amt = parseInt(text) || 0;
+        const amt = parseNum(text);
         await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", amt, dep.id);
         await addBalance(env, dep.user_id, amt, 'deposit', `dep:${dep.id}`);
         await send(env, dep.user_id, `✅ انعتمد إيداعك وانضاف ${fmt(amt)} ل.س لرصيدك 💸`);
@@ -538,7 +619,7 @@ async function handleStateText(env, uid, st, msg) {
       return send(env, uid, '✅ انبعت الرد.');
     }
     case 'adm_user_lookup': {
-      const target = await getUser(env, parseInt(text) || 0);
+      const target = await getUser(env, parseNum(text));
       if (!target) { await send(env, uid, 'ما لقيت هالمستخدم.'); return; }
       await clearState(env, uid);
       return send(env, uid, `👤 ${esc(target.name)} (${target.tg_id})\nالرصيد: ${fmt(target.balance)} ل.س\n${target.is_banned ? '🚫 محظور' : '✅ فعال'}`,
@@ -548,7 +629,7 @@ async function handleStateText(env, uid, st, msg) {
         ]] });
     }
     case 'adm_adj': {
-      const amt = parseInt(text) || 0;
+      const amt = parseNum(text);
       await addBalance(env, d.target, amt, 'adjust', 'admin');
       await clearState(env, uid);
       return send(env, uid, `✅ اتعدّل رصيد ${d.target} بمقدار ${fmt(amt)} ل.س`);
@@ -585,9 +666,11 @@ async function handleMessage(env, msg) {
     case '📋 المهام المتاحة': return listCategories(env, uid);
     case '🛠 مهامي': return myTasks(env, uid);
     case '➕ اطلب خدمة':
-      await setState(env, uid, 'client_request', {});
-      return send(env, uid, '➕ <b>طلب خدمة</b>\nاكتب شو بدك بالتفصيل: نوع الشغل، العدد، وأي تفاصيل مهمة. الإدارة بتراجع طلبك وبتحولو لمهمة منشورة للعمال.\n\n💰 شوف «قائمة الأسعار» لتعرف سعر كل تنفيذ قبل ما تطلب:',
-        { inline_keyboard: [[{ text: '💰 قائمة الأسعار', callback_data: 'prices' }]] });
+      return send(env, uid, '➕ <b>طلب خدمة</b>\nاختار خدمة جاهزة من القائمة والسعر بينحسب و بينخصم من رصيدك فوراً، والمهمة بتنزل للعمال لحالها.\nأو إذا طلبك خاص ومش موجود بالقائمة، ابعتو كنص حر و الإدارة بتراجعو:',
+        { inline_keyboard: [
+          [{ text: '🛒 اطلب من قائمة الخدمات', callback_data: 'ordcats' }],
+          [{ text: '💰 قائمة الأسعار', callback_data: 'prices' }, { text: '✍️ طلب خاص', callback_data: 'ordspecial' }],
+        ] });
     case '📦 طلباتي': {
       const rows = await all(env, 'SELECT * FROM orders WHERE client_id=? ORDER BY id DESC LIMIT 10', uid);
       const myT = await all(env, "SELECT * FROM tasks WHERE client_id=? ORDER BY id DESC LIMIT 10", uid);
@@ -667,6 +750,48 @@ async function handleCallback(env, cb) {
     const rows = await reviewQueue(env, uid, 'client');
     return showProofs(env, uid, rows, 'client');
   }
+  // ----- Client self-serve ordering -----
+  if (data === 'ordcats') return orderCategories(env, uid);
+  if (data === 'ordspecial') {
+    await setState(env, uid, 'client_request', {});
+    return send(env, uid, '✍️ <b>طلب خاص</b>\nاكتب شو بدك بالتفصيل برسالة وحدة. الإدارة بتراجع طلبك وبتحولو لمهمة.');
+  }
+  if (cmd === 'ordcat') {
+    const subs = await all(env, 'SELECT * FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id', Number(arg));
+    if (subs.length) return orderCategories(env, uid, Number(arg));
+    return orderServices(env, uid, Number(arg));
+  }
+  if (cmd === 'ordsel') {
+    const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', Number(arg));
+    if (!svc) return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.');
+    await setState(env, uid, 'ord_desc', { service_id: svc.id });
+    return send(env, uid, `🛒 <b>${esc(svc.name)}</b> — ${fmt(svc.price)} ل.س للتنفيذ\n\n✍️ اشرح المطلوب وحط الرابط برسالة وحدة:`);
+  }
+  if (data === 'ordno') { await clearState(env, uid); return send(env, uid, '❌ انلغى الطلب.', mainKb(env, uid)); }
+  if (data === 'ordok') {
+    const st = await getState(env, uid);
+    if (st.state !== 'ord_confirm') return send(env, uid, '⚠️ انتهت هالجلسة. بلّش الطلب من جديد.');
+    const d = st.data;
+    const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', d.service_id);
+    if (!svc) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.'); }
+    const total = svc.price * d.qty;
+    const u = await getUser(env, uid);
+    if (u.balance < total) {
+      await clearState(env, uid);
+      return send(env, uid, `⚠️ <b>رصيدك ما بيكفي</b>\nالمطلوب: ${fmt(total)} ل.س — رصيدك: ${fmt(u.balance)} ل.س\nاشحن محفظتك من «👛 محفظتي ← إيداع» وارجع اطلب.`, mainKb(env, uid));
+    }
+    await addBalance(env, uid, -total, 'escrow', 'order');
+    const instructions = [svc.instructions, d.desc ? `— تفاصيل العميل:\n${d.desc}` : ''].filter(Boolean).join('\n');
+    const r = await run(env, `INSERT INTO tasks(category_id,client_id,title,instructions,proof_type,price,pay,slots_total,reviewer,deadline,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, svc.category_id, uid, svc.name, instructions, svc.proof_type, svc.price, svc.pay, d.qty, svc.reviewer, '', now());
+    const t = await one(env, 'SELECT * FROM tasks WHERE id=?', r.meta.last_row_id);
+    await clearState(env, uid);
+    const fresh = await getUser(env, uid);
+    await send(env, uid, `✅ <b>تم طلبك ونزلت المهمة #${t.id} للعمال فوراً</b>\n📌 ${esc(svc.name)} × ${d.qty}\nانخصم ${fmt(total)} ل.س — رصيدك هلأ ${fmt(fresh.balance)} ل.س\nبتوصلك إشعارات مع كل تنفيذ بينقبل 👌`, mainKb(env, uid));
+    await notifyWorkers(env, t);
+    if (env.ADMIN_ID && String(env.ADMIN_ID) !== String(uid)) await send(env, env.ADMIN_ID, `🛒 طلب ذاتي جديد: «${esc(svc.name)}» × ${d.qty} من ${uid} (${fmt(total)} ل.س)`);
+    return;
+  }
   if (cmd === 'ok' || cmd === 'no') {
     const claim = await one(env, 'SELECT * FROM claims WHERE id=?', Number(arg));
     if (!claim || claim.status !== 'submitted') return send(env, uid, 'هالإثبات انحسم من قبل.');
@@ -698,13 +823,18 @@ async function handleCallback(env, cb) {
   }
 
   // ---------- Admin ----------
-  if (!data.startsWith('adm') && !['twc', 'twp', 'twr', 'twf'].includes(cmd)) return;
-  if (cmd === 'twc' || cmd === 'twp' || cmd === 'twr') {
+  if (!data.startsWith('adm') && !['twc', 'twp', 'twr', 'twf', 'svp', 'svr'].includes(cmd)) return;
+  if (cmd === 'twc' || cmd === 'twp' || cmd === 'twr' || cmd === 'twf' || cmd === 'svp' || cmd === 'svr') {
     if (!isAdmin(env, uid)) return;
     const st = await getState(env, uid); const d = st.data;
     if (cmd === 'twc') { d.category_id = Number(arg); await setState(env, uid, 'tw_inst', d); return send(env, uid, '📋 اكتب تعليمات التنفيذ للعامل (أو «-» إذا ما في):'); }
     if (cmd === 'twp') { d.proof_type = arg; await setState(env, uid, 'tw_price', d); return send(env, uid, '💰 سعر التنفيذ على العميل؟ (ل.س)'); }
-    if (cmd === 'twr') { d.reviewer = arg === 'client' && d.client_id ? 'client' : 'admin'; await setState(env, uid, 'tw_dead', d); return send(env, uid, '⏰ المهلة؟ (اكتبها نصاً، أو «-» لتخطيها)'); }
+    if (cmd === 'twr') { d.reviewer = arg === 'client' && d.client_id ? 'client' : 'admin'; await setState(env, uid, 'tw_dead', d); return send(env, uid, '⏰ المهلة؟ (اكتبها نصاً، أو «-» لتخطيها)', { inline_keyboard: [[{ text: '⏭ نشر فوراً بدون مهلة', callback_data: 'twf:skip' }]] }); }
+    if (cmd === 'twf') { d.deadline = ''; await clearState(env, uid); return publishTask(env, uid, d); }
+    if (cmd === 'svp') { d.proof_type = arg; await setState(env, uid, 'svc_rev', d);
+      return send(env, uid, '👁 مين بيراجع إثباتات هالخدمة عادة؟', { inline_keyboard: [[
+        { text: '👑 أنا (الأدمن)', callback_data: 'svr:admin' }, { text: '🧑‍💼 العميل الطالب', callback_data: 'svr:client' }]] }); }
+    if (cmd === 'svr') { d.reviewer = arg; await setState(env, uid, 'svc_inst', d); return send(env, uid, '📋 تعليمات ثابتة بتنحط مع كل طلب لهالخدمة (أو «-» إذا ما في):'); }
     return;
   }
   if (!isAdmin(env, uid)) return;
@@ -722,6 +852,23 @@ async function handleCallback(env, cb) {
     return send(env, uid, '➕ <b>مهمة جديدة</b> (التصنيف محدد جاهز)\nعنوان المهمة:');
   }
   if (data === 'adm:cats') return adminCats(env, uid);
+  if (cmd === 'adm' && arg === 'svcs') return adminSvcs(env, uid, Number(arg2));
+  if (cmd === 'adm' && arg === 'addsvc') { await setState(env, uid, 'svc_name', { category_id: Number(arg2) }); return send(env, uid, '🛠 <b>خدمة جديدة</b>\nاسم الخدمة (متل ما بيشوفها العميل):'); }
+  if (cmd === 'adm' && arg === 'delsvc') {
+    await run(env, 'DELETE FROM services WHERE id=?', Number(arg2));
+    const back = Number(data.split(':')[3]) || 0;
+    await send(env, uid, '🗑 انحذفت الخدمة.');
+    return adminSvcs(env, uid, back);
+  }
+  if (data === 'adm:tasks') return adminTasks(env, uid);
+  if (cmd === 'adm' && arg === 'closetask') {
+    const t = await one(env, "SELECT * FROM tasks WHERE id=? AND status='open'", Number(arg2));
+    if (!t) return send(env, uid, 'هالمهمة مسكرة من قبل.');
+    const clientId = t.client_id;
+    await closeTaskRefund(env, t);
+    if (clientId) await send(env, clientId, `🔒 سكّرت الإدارة المهمة «${esc(t.title)}» ورجعلك رصيد الخانات يلي ما تنفذت.`);
+    return send(env, uid, `🔒 انسكّرت المهمة #${t.id}.`);
+  }
   if (cmd === 'adm' && arg === 'addcat') { await setState(env, uid, 'adm_catname', { parent_id: Number(arg2) || null }); return send(env, uid, 'اسم التصنيف:'); }
   if (cmd === 'adm' && arg === 'delcat') {
     await run(env, 'DELETE FROM categories WHERE id=? OR parent_id=?', Number(arg2), Number(arg2));
@@ -803,6 +950,7 @@ async function scheduled(env) {
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, name TEXT DEFAULT '', username TEXT DEFAULT '', balance INTEGER NOT NULL DEFAULT 0, referrer_id INTEGER, is_banned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, name TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, name TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0, pay INTEGER NOT NULL DEFAULT 0, proof_type TEXT NOT NULL DEFAULT 'any', reviewer TEXT NOT NULL DEFAULT 'admin', instructions TEXT DEFAULT '', is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, client_id INTEGER, title TEXT NOT NULL, instructions TEXT DEFAULT '', proof_type TEXT NOT NULL DEFAULT 'any', price INTEGER NOT NULL DEFAULT 0, pay INTEGER NOT NULL DEFAULT 0, slots_total INTEGER NOT NULL DEFAULT 1, slots_done INTEGER NOT NULL DEFAULT 0, reviewer TEXT NOT NULL DEFAULT 'admin', status TEXT NOT NULL DEFAULT 'open', deadline TEXT DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, worker_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed', proof_text TEXT DEFAULT '', proof_file TEXT DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, submitted_at INTEGER DEFAULT 0, reviewed_at INTEGER DEFAULT 0, UNIQUE(task_id, worker_id))`,
   `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', created_at INTEGER NOT NULL DEFAULT 0)`,

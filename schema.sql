@@ -16,6 +16,21 @@ CREATE TABLE IF NOT EXISTS categories (
   is_active INTEGER NOT NULL DEFAULT 1
 );
 
+-- A service = an admin-defined offer with fixed prices. Clients order it
+-- self-serve (pick -> details -> quantity -> instant balance deduction),
+-- and each order becomes one task.
+CREATE TABLE IF NOT EXISTS services (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER,
+  name TEXT NOT NULL,
+  price INTEGER NOT NULL DEFAULT 0,
+  pay INTEGER NOT NULL DEFAULT 0,
+  proof_type TEXT NOT NULL DEFAULT 'any',
+  reviewer TEXT NOT NULL DEFAULT 'admin',
+  instructions TEXT DEFAULT '',
+  is_active INTEGER NOT NULL DEFAULT 1
+);
+
 -- A task = ONE service card with a slot counter. slots_done counts APPROVED claims.
 -- client_id NULL means the platform (admin) itself funds the task.
 CREATE TABLE IF NOT EXISTS tasks (

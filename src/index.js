@@ -66,6 +66,17 @@ async function ensureUser(env, from, refId = null) {
     await run(env, 'INSERT INTO users(tg_id,name,username,referrer_id,created_at) VALUES(?,?,?,?,?)',
       from.id, `${from.first_name || ''} ${from.last_name || ''}`.trim(), from.username || '', refId, now());
     u = await getUser(env, from.id);
+    if (refId) {
+      const every = parseNum(await setting(env, 'ref_milestone_every', '0'));
+      const bonus = parseNum(await setting(env, 'ref_milestone_bonus', '0'));
+      if (every > 0 && bonus > 0) {
+        const c = await one(env, 'SELECT COUNT(*) n FROM users WHERE referrer_id=?', refId);
+        if (c.n > 0 && c.n % every === 0) {
+          await addBalance(env, refId, bonus, 'referral', 'milestone');
+          await send(env, refId, `🎉 <b>مكافأة مرحلة إحالة!</b>\nصار عندك ${c.n} إحالة — انضاف لرصيدك ${fmt(bonus)} ل.س 🎁`);
+        }
+      }
+    }
   }
   return u;
 }
@@ -132,8 +143,9 @@ function roleKb(env, uid, role) {
     ? [
       [{ text: '📋 المهام المتاحة' }, { text: '🛠 مهامي' }],
       [{ text: '👛 محفظتي' }, { text: '📄 إنشاء CV' }],
-      [{ text: '🎁 الإحالة' }, { text: '👤 حسابي' }],
-      [{ text: '🆘 الدعم' }, { text: '🔄 تبديل الدور' }],
+      [{ text: '🎁 الإحالة' }, { text: '🏆 أوائل الأسبوع' }],
+      [{ text: '🆘 الدعم' }, { text: '👤 حسابي' }],
+      [{ text: '🔄 تبديل الدور' }],
     ]
     : [
       [{ text: '➕ اطلب خدمة' }, { text: '💰 قائمة الأسعار' }],
@@ -171,7 +183,11 @@ const cancelKb = { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: '
 async function showHome(env, uid) {
   const u = await getUser(env, uid);
   const welcome = await setting(env, 'welcome_text', 'أهلا فيك بـ مصاري 💸');
-  await send(env, uid, `${esc(welcome)}\n\n👛 رصيدك: <b>${fmt(u?.balance)} ل.س</b>`, await mainKb(env, uid));
+  const uc = await one(env, 'SELECT COUNT(*) n FROM users');
+  const done = await one(env, 'SELECT COALESCE(SUM(slots_done),0) s FROM tasks');
+  const paid = await one(env, "SELECT COALESCE(SUM(amount),0) s FROM withdrawals WHERE status='approved'");
+  const stats = `\n\n📊 <b>مصاري بالأرقام:</b> 👥 ${uc.n} مستخدم • ✅ ${done.s} تنفيذ ناجح • 💸 ${fmt(paid.s)} ل.س اندفعت للعمال`;
+  await send(env, uid, `${esc(welcome)}${stats}\n\n👛 رصيدك: <b>${fmt(u?.balance)} ل.س</b>`, await mainKb(env, uid));
 }
 
 // ============================================================
@@ -247,7 +263,65 @@ async function referral(env, uid) {
     `• بتاخد <b>${rw}%</b> من أجر كل عامل بيجي من رابطك — على كل مهمة بينفذها، على طول.\n` +
     `• وبتاخد <b>${rc}%</b> من قيمة كل طلب بيحطو عميل بيجي من رابطك.\n` +
     `• الأرباح بتنضاف لرصيدك تلقائياً لحظة قبول التنفيذ.\n\n` +
-    `👥 إحالاتك: ${count.n} شخص\n💰 مجموع أرباحك من الإحالة: ${fmt(earned.s)} ل.س\n\n🔗 رابطك:\n${link}`, backKb);
+    `👥 إحالاتك: ${count.n} شخص\n💰 مجموع أرباحك من الإحالة: ${fmt(earned.s)} ل.س\n\n🔗 رابطك:\n${link}`, { inline_keyboard: [
+    [{ text: '📣 شارك رابطك', url: shareUrl(link, 'عم نفّذ مهام واجمع مصاري من بوت مصاري 💸 جرّبو من رابطي:') }],
+    [{ text: '⬅️ رجوع', callback_data: 'home' }],
+  ]});
+}
+
+let _botUser = '';
+async function botUsername(env) {
+  if (_botUser) return _botUser;
+  const me = await tg(env, 'getMe');
+  _botUser = me?.result?.username || 'masari1bot';
+  return _botUser;
+}
+async function deepLink(env, payload) {
+  const base = `https://t.me/${await botUsername(env)}`;
+  return payload ? `${base}?start=${payload}` : base;
+}
+const shareUrl = (link, text) => `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+
+async function promoPost(env, text, kb) {
+  const ref = normRef(await setting(env, 'promo_channel', ''));
+  if (!ref) return;
+  const r = await tg(env, 'sendMessage', { chat_id: ref, text, parse_mode: 'HTML', reply_markup: kb });
+  if (!r.ok) {
+    const last = parseNum(await setting(env, 'promo_warn_at', '0'));
+    if (now() - last > 3600) {
+      await setSetting(env, 'promo_warn_at', String(now()));
+      if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `⚠️ ما قدرت انشر بقناة النشر (${esc(ref)}). تأكد إنو البوت أدمن فيها.\nالسبب: ${esc(r.description || '')}`);
+    }
+  }
+}
+
+async function topWorkers(env, days = 7) {
+  const since = now() - days * 86400;
+  return all(env, `SELECT c.worker_id, COUNT(*) n, COALESCE(SUM(t.pay),0) earned FROM claims c JOIN tasks t ON t.id=c.task_id WHERE c.status='approved' AND c.reviewed_at>=? GROUP BY c.worker_id ORDER BY n DESC, earned DESC LIMIT 5`, since);
+}
+
+async function leaderboard(env, uid) {
+  const rows = await topWorkers(env);
+  if (!rows.length) return send(env, uid, '🏆 <b>أوائل الأسبوع</b>\nلسا ما في تنفيذات مقبولة هالأسبوع — كون أول واحد! 💪', backKb);
+  const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+  const lines = [];
+  for (let i = 0; i < rows.length; i++) {
+    const w = await getUser(env, rows[i].worker_id);
+    lines.push(`${medals[i]} ${esc(w?.name || 'عامل')} — ${rows[i].n} تنفيذ (${fmt(rows[i].earned)} ل.س)`);
+  }
+  const prize = parseNum(await setting(env, 'contest_prize', '0'));
+  return send(env, uid, `🏆 <b>أوائل هالأسبوع (آخر ٧ أيام)</b>\n\n${lines.join('\n')}${prize > 0 ? `\n\n🎁 جائزة الأول مساء الجمعة: <b>${fmt(prize)} ل.س</b>` : ''}`, backKb);
+}
+
+async function taskCard(env, uid, taskId) {
+  const t = await one(env, "SELECT * FROM tasks WHERE id=? AND status='open'", taskId);
+  if (!t) { await send(env, uid, '⚠️ هالمهمة سكّرت أو ما عادت متاحة.'); return showHome(env, uid); }
+  const left = t.slots_total - t.slots_done;
+  const link = await deepLink(env, `task_${t.id}`);
+  return send(env, uid, `📌 <b>${esc(t.title)}</b>\n\n📋 ${esc(t.instructions || '')}\n\n💰 الأجر: <b>${fmt(t.pay)} ل.س</b>\n📋 خانات باقية: ${left}`, { inline_keyboard: [
+    [{ text: '✅ خذ المهمة', callback_data: `take:${t.id}` }],
+    [{ text: '🔗 شارك المهمة', url: shareUrl(link, `مهمة بـ ${fmt(t.pay)} ل.س على بوت مصاري — نفّذها واجمع مصاريك`) }],
+  ]});
 }
 
 // ---------- Client price list (services, client-facing prices only) ----------
@@ -343,8 +417,10 @@ async function offerView(env, uid, offerId) {
   const o = await one(env, 'SELECT * FROM offers WHERE id=? AND is_active=1', offerId);
   if (!o) return priceList(env, uid);
   const txt = `🛒 <b>${esc(o.name)}</b>\n\n${esc(o.details || '')}\n\n💵 السعر: <b>${fmt(o.price)} ل.س</b> للوحدة\n\nهل تريد الشراء؟`;
+  const link = await deepLink(env, `ofr_${o.id}`);
   return send(env, uid, txt, { inline_keyboard: [
     [{ text: '✅ نعم، بدي اشتري', callback_data: `ofrbuy:${o.id}` }],
+    [{ text: '🔗 شارك الخدمة', url: shareUrl(link, `خدمة «${o.name}» بـ ${fmt(o.price)} ل.س على بوت مصاري`) }],
     [{ text: '⬅️ رجوع لقائمة الأسعار', callback_data: 'prices' }],
   ]});
 }
@@ -414,6 +490,14 @@ async function approveClaim(env, claim) {
   await run(env, 'UPDATE tasks SET slots_done = slots_done + 1 WHERE id=?', t.id);
   await addBalance(env, claim.worker_id, t.pay, 'earn', `task:${t.id}`);
   await send(env, claim.worker_id, `✅ <b>انقبل تنفيذك!</b>\n📌 ${esc(t.title)}\nانضاف لرصيدك ${fmt(t.pay)} ل.س 💸`);
+  const ftb = parseNum(await setting(env, 'first_task_bonus', '0'));
+  if (ftb > 0) {
+    const cnt = await one(env, "SELECT COUNT(*) n FROM claims WHERE worker_id=? AND status='approved'", claim.worker_id);
+    if (cnt.n === 1) {
+      await addBalance(env, claim.worker_id, ftb, 'earn', 'first_task');
+      await send(env, claim.worker_id, `🎁 <b>مكافأة أول مهمة!</b> انضاف لرصيدك ${fmt(ftb)} ل.س — بداية موفقة، كمل هيك 💪`);
+    }
+  }
 
   // Referrals — paid out of the platform commission (price - pay), capped by it.
   let commission = Math.max(0, t.price - t.pay);
@@ -617,17 +701,19 @@ async function adminChans(env, uid) {
 }
 
 async function adminSettings(env, uid) {
-  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days', 'usd_rate'];
+  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days', 'usd_rate', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize'];
   const vals = {};
   for (const k of keys) vals[k] = await setting(env, k, '');
+  const promo = await setting(env, 'promo_channel', '');
   const kb = { inline_keyboard: [
     ...keys.map((k) => [{ text: `✏️ ${k} = ${vals[k]}`, callback_data: `adm:set:${k}` }]),
+    [{ text: `📢 قناة النشر: ${promo || 'غير محددة'}`, callback_data: 'adm:set:promo_channel' }],
     [{ text: '✏️ نص الترحيب', callback_data: 'adm:set:welcome_text' }],
     [{ text: '🏦 وسائل الإيداع', callback_data: 'adm:depmet' }],
     [{ text: '⬅️ رجوع', callback_data: 'adm:home' }],
   ]};
   await send(env, uid,
-    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم\n• سعر صرف الدولار (usd_rate): ${vals.usd_rate ? fmt(vals.usd_rate) + ' ل.س' : 'غير محدد — حددو كرمال حساب USDT'}`, kb);
+    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم\n• سعر صرف الدولار (usd_rate): ${vals.usd_rate ? fmt(vals.usd_rate) + ' ل.س' : 'غير محدد — حددو كرمال حساب USDT'}\n• مكافأة أول مهمة (first_task_bonus): ${fmt(vals.first_task_bonus)} ل.س (٠ = مطفأة)\n• مرحلة الإحالة: كل ${vals.ref_milestone_every || '٠'} إحالة ← ${fmt(vals.ref_milestone_bonus)} ل.س (٠ = مطفأة)\n• جائزة مسابقة الأسبوع (contest_prize): ${fmt(vals.contest_prize)} ل.س (٠ = بلا جائزة)\n• قناة النشر الترويجي: ${promo || 'غير محددة'}`, kb);
 }
 
 const isUsdtMethod = (name) => /usdt|tether|تيثر|دولار/i.test(name || '');
@@ -671,6 +757,8 @@ async function notifyWorkers(env, t) {
   for (const u of users) {
     try { await send(env, u.tg_id, `🆕 <b>مهمة جديدة!</b>\n📌 ${esc(t.title)}\n💰 الأجر: ${fmt(t.pay)} ل.س — شوف «المهام المتاحة» 📋`); } catch (e) {}
   }
+  const link = await deepLink(env, `task_${t.id}`);
+  await promoPost(env, `🆕 <b>مهمة جديدة على مصاري!</b>\n📌 ${esc(t.title)}\n💰 الأجر: <b>${fmt(t.pay)} ل.س</b>\n📋 الخانات: ${t.slots_total}\n\nنفّذها قبل ما تخلص 👇`, { inline_keyboard: [[{ text: '📋 نفّذها من هون', url: link }]] });
 }
 
 async function publishTask(env, uid, d) {
@@ -981,7 +1069,7 @@ async function handleStateText(env, uid, st, msg) {
       return adminChans(env, uid);
     }
     case 'adm_set': {
-      const NUMKEYS = ['usd_rate', 'min_withdraw', 'ref_worker_pct', 'ref_client_pct', 'auto_approve_days'];
+      const NUMKEYS = ['usd_rate', 'min_withdraw', 'ref_worker_pct', 'ref_client_pct', 'auto_approve_days', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize'];
       await setSetting(env, d.key, NUMKEYS.includes(d.key) ? String(parseNum(text)) : text);
       await clearState(env, uid);
       await send(env, uid, `✅ اتحدّث «${d.key}»`);
@@ -1041,6 +1129,9 @@ async function handleMessage(env, msg) {
     if (await gate(env, uid)) {
       const me = await getUser(env, uid);
       if (!isAdmin(env, uid) && !me?.role) return rolePick(env, uid);
+      const mo = text.match(/ofr_(\d+)/); if (mo) return offerView(env, uid, Number(mo[1]));
+      const mt = text.match(/task_(\d+)/); if (mt) return taskCard(env, uid, Number(mt[1]));
+      if (text.includes('leaders')) return leaderboard(env, uid);
       await showHome(env, uid);
     }
     return;
@@ -1060,7 +1151,7 @@ async function handleMessage(env, msg) {
 
   // Active wizard state consumes text/photo first (except menu buttons).
   const st = await getState(env, uid);
-  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن','💰 قائمة الأسعار','📄 إنشاء CV','🔄 تبديل الدور','/wallet','/balance','/tasks','/order'].includes(text);
+  const isMenuBtn = ['📋 المهام المتاحة','🛠 مهامي','➕ اطلب خدمة','📦 طلباتي','👛 محفظتي','🎁 الإحالة','🆘 الدعم','👤 حسابي','👑 لوحة الأدمن','💰 قائمة الأسعار','📄 إنشاء CV','🔄 تبديل الدور','🏆 أوائل الأسبوع','/wallet','/balance','/tasks','/order'].includes(text);
   if (st.state && !isMenuBtn && (text || msg.photo)) return handleStateText(env, uid, st, msg);
   if (isMenuBtn) await clearState(env, uid);
 
@@ -1070,6 +1161,7 @@ async function handleMessage(env, msg) {
       const me = await getUser(env, uid);
       return send(env, uid, `💰 رصيدك الحالي: <b>${fmt(me?.balance)} ل.س</b>`, await mainKb(env, uid));
     }
+    case '🏆 أوائل الأسبوع': return leaderboard(env, uid);
     case '/tasks': return listCategories(env, uid);
     case '/order': return orderIntro(env, uid);
     case '📋 المهام المتاحة': return listCategories(env, uid);
@@ -1452,7 +1544,11 @@ async function handleCallback(env, cb) {
   if (data === 'adm:wds') return adminWds(env, uid);
   if (cmd === 'adm' && arg === 'wdok') {
     const w = await one(env, 'SELECT * FROM withdrawals WHERE id=?', Number(arg2));
-    if (w?.status === 'pending') { await run(env, "UPDATE withdrawals SET status='approved' WHERE id=?", w.id); await send(env, w.user_id, `✅ تنفذ سحبك: ${fmt(w.amount)} ل.س 💸`); }
+    if (w?.status === 'pending') {
+      await run(env, "UPDATE withdrawals SET status='approved' WHERE id=?", w.id);
+      await send(env, w.user_id, `✅ تنفذ سحبك: ${fmt(w.amount)} ل.س 💸`);
+      await promoPost(env, `✅ <b>إثبات سحب جديد من مصاري</b>\nعامل سحب اليوم <b>${fmt(w.amount)} ل.س</b> 💸\nنفّذ مهام واجمع مصاريك متلو 👇`, { inline_keyboard: [[{ text: '🤖 افتح بوت مصاري', url: await deepLink(env, '') }]] });
+    }
     return send(env, uid, '✅ تسجل كمُدفوع.');
   }
   if (cmd === 'adm' && arg === 'wdrej') {
@@ -1496,6 +1592,33 @@ async function scheduled(env) {
   const stale = await all(env, `SELECT c.* FROM claims c JOIN tasks t ON t.id=c.task_id
     WHERE c.status='submitted' AND t.reviewer='client' AND c.submitted_at>0 AND c.submitted_at<?`, cutoff);
   for (const c of stale) await approveClaim(env, c);
+  // Weekly contest: Friday evening (Damascus) — post the leaderboard to the promo channel and pay the winner.
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Damascus', weekday: 'short', hour: '2-digit', hour12: false }).formatToParts(new Date());
+    const wd = parts.find((p) => p.type === 'weekday')?.value;
+    const hr = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+    if (wd === 'Fri' && hr >= 18) {
+      const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Damascus', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const guardKey = `contest_week_${dayKey}`;
+      if (!(await setting(env, guardKey, ''))) {
+        const rows = await topWorkers(env);
+        if (rows.length) {
+          const prize = parseNum(await setting(env, 'contest_prize', '0'));
+          const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+          const lines = [];
+          for (let i = 0; i < rows.length; i++) { const w = await getUser(env, rows[i].worker_id); lines.push(`${medals[i]} ${esc(w?.name || 'عامل')} — ${rows[i].n} تنفيذ (${fmt(rows[i].earned)} ل.س)`); }
+          if (prize > 0) {
+            const winner = await getUser(env, rows[0].worker_id);
+            await addBalance(env, rows[0].worker_id, prize, 'earn', 'contest');
+            await send(env, rows[0].worker_id, `🏆 <b>مبروك! انت الأول هالأسبوع</b> — انضافت جائزتك ${fmt(prize)} ل.س لرصيدك 🎉`);
+            lines.push(`\n🎁 جائزة الأول (${fmt(prize)} ل.س) راحت لـ ${esc(winner?.name || 'الأول')} ✅`);
+          }
+          await promoPost(env, `🏆 <b>أوائل الأسبوع على مصاري</b>\n\n${lines.join('\n')}\n\nنفّذ مهام هالأسبوع وكون انت الأول الجاية 👇`, { inline_keyboard: [[{ text: '🏆 شوف الأوائل', url: await deepLink(env, 'leaders') }]] });
+        }
+        await setSetting(env, guardKey, '1');
+      }
+    }
+  } catch (e) {}
 }
 
 // ---------- One-time schema setup (mirrors schema.sql) ----------
@@ -1517,7 +1640,7 @@ const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS offers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, details TEXT DEFAULT '', price INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, offer_id INTEGER, offer_name TEXT DEFAULT '', qty INTEGER NOT NULL DEFAULT 1, total INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'awaiting_payment', deposit_id INTEGER, created_at INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS cv_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, system TEXT DEFAULT '', data TEXT DEFAULT '{}', status TEXT NOT NULL DEFAULT 'new', created_at INTEGER NOT NULL DEFAULT 0)`,
-  `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]')`,
+  `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]'), ('promo_channel', ''), ('first_task_bonus', '0'), ('ref_milestone_every', '0'), ('ref_milestone_bonus', '0'), ('contest_prize', '0')`,
 ];
 
 const MIGRATIONS = [

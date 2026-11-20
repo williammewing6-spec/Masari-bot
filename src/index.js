@@ -119,6 +119,7 @@ const mainKb = (env, uid) => {
   return { keyboard: rows, resize_keyboard: true };
 };
 const backKb = { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'home' }]] };
+const cancelKb = { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel' }]] };
 
 async function showHome(env, uid) {
   const u = await getUser(env, uid);
@@ -344,6 +345,7 @@ const adminWorkKb = { inline_keyboard: [
 ]};
 const adminMoneyKb = { inline_keyboard: [
   [{ text: '💰 إيداعات معلقة', callback_data: 'adm:deps' }, { text: '💸 سحوبات معلقة', callback_data: 'adm:wds' }],
+  [{ text: '🏦 وسائل الإيداع', callback_data: 'adm:depmet' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
 const adminPeopleKb = { inline_keyboard: [
@@ -432,15 +434,36 @@ async function showProofs(env, uid, rows, tag) {
   }
 }
 
+async function adminDepMethods(env, uid) {
+  const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+  let txt = '🏦 <b>وسائل الإيداع</b>\nهي الوسائل يلي بيشوفها المستخدم وقت يختار «➕ إيداع» من محفظتو:\n';
+  if (!methods.length) txt += '\nما في وسائل بعد — ضيف أول وسيلة من الزر تحت 👇';
+  const kb = [];
+  methods.forEach((mm, i) => {
+    txt += `\n• <b>${esc(mm.name)}</b>\n${esc(mm.details)}`;
+    kb.push([{ text: `🗑 حذف «${mm.name}»`, callback_data: `adm:delmet:${i}` }]);
+  });
+  kb.push([{ text: '➕ وسيلة إيداع جديدة', callback_data: 'adm:addmet' }]);
+  kb.push([{ text: '⬅️ رجوع', callback_data: 'adm:home' }]);
+  return send(env, uid, txt, { inline_keyboard: kb });
+}
+
+async function saveDepMethods(env, methods) {
+  await run(env, "INSERT INTO settings(key,value) VALUES('deposit_methods',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(methods));
+}
+
 async function adminDeps(env, uid) {
   const rows = await all(env, "SELECT d.*, u.name FROM deposits d JOIN users u ON u.tg_id=d.user_id WHERE d.status='pending' ORDER BY d.id");
   if (!rows.length) return send(env, uid, '💰 ما في إيداعات معلقة.', adminKb);
   for (const d of rows) {
-    await send(env, uid, `💰 <b>إيداع #${d.id}</b>\nالمستخدم: ${esc(d.name)} (${d.user_id})\nالطريقة: ${esc(d.method)}\nملاحظة: ${esc(d.note)}`,
-      { inline_keyboard: [[
-        { text: '✅ اعتماد بمبلغ…', callback_data: `adm:depok:${d.id}` },
-        { text: '❌ رفض', callback_data: `adm:deprej:${d.id}` },
-      ]] });
+    const btns = [];
+    if (d.proof_file) btns.push([{ text: '📷 شوف السكرين شوت', callback_data: `adm:depshot:${d.id}` }]);
+    btns.push([
+      { text: d.amount > 0 ? `✅ اعتماد ${fmt(d.amount)} ل.س` : '✅ اعتماد بمبلغ…', callback_data: `adm:depok:${d.id}` },
+      { text: '❌ رفض', callback_data: `adm:deprej:${d.id}` },
+    ]);
+    await send(env, uid, `💰 <b>إيداع #${d.id}</b>\nالمستخدم: ${esc(d.name)} (${d.user_id})\nالطريقة: ${esc(d.method)}\nالمبلغ: <b>${d.amount > 0 ? fmt(d.amount) + ' ل.س' : '—'}</b>${d.note ? `\nملاحظة: ${esc(d.note)}` : ''}`,
+      { inline_keyboard: btns });
   }
 }
 
@@ -474,7 +497,7 @@ async function adminSettings(env, uid) {
   const kb = { inline_keyboard: [
     ...keys.map((k) => [{ text: `✏️ ${k} = ${vals[k]}`, callback_data: `adm:set:${k}` }]),
     [{ text: '✏️ نص الترحيب', callback_data: 'adm:set:welcome_text' }],
-    [{ text: '✏️ وسائل الإيداع (JSON)', callback_data: 'adm:set:deposit_methods' }],
+    [{ text: '🏦 وسائل الإيداع', callback_data: 'adm:depmet' }],
     [{ text: '⬅️ رجوع', callback_data: 'adm:home' }],
   ]};
   await send(env, uid,
@@ -594,12 +617,40 @@ async function handleStateText(env, uid, st, msg) {
       if (reviewerId) await send(env, reviewerId, `🧾 إثبات جديد بانتظار مراجعتك للمهمة «${esc(t.title)}»`);
       return;
     }
-    case 'dep_note': {
-      await run(env, 'INSERT INTO deposits(user_id,method,note,created_at) VALUES(?,?,?,?)', uid, d.method, text, now());
+    case 'dep_amount': {
+      const amt = parseNum(text);
+      if (!amt || amt <= 0) return send(env, uid, '⚠️ ابعت المبلغ رقم صحيح (ل.س):', cancelKb);
+      d.amount = amt; await setState(env, uid, 'dep_shot', d);
+      const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+      const mm = methods.find((x) => x.name === d.method);
+      return send(env, uid, `💳 حوّل <b>${fmt(amt)} ل.س</b> عبر «${esc(d.method)}» لهون:\n${esc(mm?.details || '')}\n\n📸 بعد ما تحوّل، ابعت <b>سكرين شوت</b> التحويل هون (أو رقم العملية كنص).`, cancelKb);
+    }
+    case 'dep_shot': {
+      const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : '';
+      if (!fileId && !text) return send(env, uid, '📸 ابعت سكرين شوت التحويل (أو رقم العملية كنص):', cancelKb);
+      const r = await run(env, 'INSERT INTO deposits(user_id,method,note,amount,proof_file,created_at) VALUES(?,?,?,?,?,?)', uid, d.method, fileId ? '' : text, d.amount || 0, fileId, now());
+      const depId = r.meta.last_row_id;
       await clearState(env, uid);
-      await send(env, uid, '✅ وصل طلب الإيداع للإدارة. بس يتحقق الدفع بينضاف لرصيدك وبيوصلك إشعار.', mainKb(env, uid));
-      if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `💰 طلب إيداع جديد (${esc(d.method)}) من ${uid}: ${esc(text)}`);
+      await send(env, uid, '✅ وصل طلب الإيداع للإدارة. بس يتحققوا من التحويل بينضاف لرصيدك وبيوصلك إشعار.', mainKb(env, uid));
+      if (env.ADMIN_ID) {
+        const cap = `💰 <b>إيداع جديد #${depId}</b>\nمن: ${uid}\nالطريقة: ${esc(d.method)}\nالمبلغ: <b>${fmt(d.amount)} ل.س</b>`;
+        const kb = { inline_keyboard: [[
+          { text: `✅ اعتماد ${fmt(d.amount)} ل.س`, callback_data: `adm:depok:${depId}` },
+          { text: '❌ رفض', callback_data: `adm:deprej:${depId}` },
+        ]] };
+        if (fileId) await tg(env, 'sendPhoto', { chat_id: env.ADMIN_ID, photo: fileId, caption: cap, parse_mode: 'HTML', reply_markup: kb });
+        else await send(env, env.ADMIN_ID, `${cap}\nرقم العملية: ${esc(text)}`, kb);
+      }
       return;
+    }
+    case 'met_name': d.name = text; await setState(env, uid, 'met_details', d); return send(env, uid, '📍 ابعت تفاصيل التحويل لهالوسيلة (الرقم / العنوان / الرابط + أي تعليمات) — هي يلي بتظهر للمستخدم بعد ما يحدد المبلغ:', cancelKb);
+    case 'met_details': {
+      const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+      methods.push({ name: d.name, details: text });
+      await saveDepMethods(env, methods);
+      await clearState(env, uid);
+      await send(env, uid, `✅ انضافت وسيلة «${esc(d.name)}».`);
+      return adminDepMethods(env, uid);
     }
     case 'wd_method': d.method = text; await setState(env, uid, 'wd_details', d); return send(env, uid, '📍 ابعت الرقم/العنوان يلي بدك التحويل عليه:');
     case 'wd_details': d.details = text; await setState(env, uid, 'wd_amount', d); return send(env, uid, '💸 كم المبلغ؟ (ل.س)');
@@ -625,11 +676,12 @@ async function handleStateText(env, uid, st, msg) {
     }
     // ----- Service definition wizard (admin) -----
     case 'svc_name': d.name = text; await setState(env, uid, 'svc_price', d); return send(env, uid, '💰 سعر التنفيذ على العميل؟ (ل.س)');
-    case 'svc_price': d.price = parseNum(text); await setState(env, uid, 'svc_pay', d); return send(env, uid, '💵 أجر العامل على التنفيذ الواحد؟ (ل.س)');
-    case 'svc_pay': d.pay = parseNum(text); await setState(env, uid, 'svc_proof', d);
+    case 'svc_price': { const v = parseNum(text); if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb); d.price = v; await setState(env, uid, 'svc_pay', d); return send(env, uid, '💵 أجر العامل على التنفيذ الواحد؟ (ل.س)'); }
+    case 'svc_pay': { const v = parseNum(text); if (v === null || v === undefined || isNaN(v) || v < 0) return send(env, uid, '⚠️ ابعت رقم صحيح (صفر أو أكتر):', cancelKb); d.pay = v; await setState(env, uid, 'svc_proof', d);
       return send(env, uid, '📄 نوع الإثبات المطلوب من العامل:', { inline_keyboard: [[
         { text: '🖼 صورة', callback_data: 'svp:photo' }, { text: '✍️ نص', callback_data: 'svp:text' },
         { text: '🔗 رابط', callback_data: 'svp:link' }, { text: 'أي شي', callback_data: 'svp:any' }]] });
+    }
     case 'svc_inst': {
       await run(env, 'INSERT INTO services(category_id,name,price,pay,proof_type,reviewer,instructions) VALUES(?,?,?,?,?,?,?)',
         d.category_id, d.name, d.price, d.pay, d.proof_type, d.reviewer, text === '-' ? '' : text);
@@ -801,6 +853,7 @@ async function handleCallback(env, cb) {
     return;
   }
   if (data === 'home') return showHome(env, uid);
+  if (data === 'cancel') { await clearState(env, uid); return send(env, uid, '❌ انلغت العملية.', mainKb(env, uid)); }
   if (data === 'cats') return listCategories(env, uid);
   if (data === 'prices') return priceList(env, uid);
   if (cmd === 'cat') {
@@ -858,6 +911,7 @@ async function handleCallback(env, cb) {
     const st = await getState(env, uid);
     if (st.state !== 'ord_confirm') return send(env, uid, '⚠️ انتهت هالجلسة. بلّش الطلب من جديد.');
     const d = st.data;
+    await clearState(env, uid); // consume the confirmation at once — a double-tap cannot deduct twice
     const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', d.service_id);
     if (!svc) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.'); }
     const total = svc.price * d.qty;
@@ -900,8 +954,8 @@ async function handleCallback(env, cb) {
     const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
     const mm = methods[Number(arg)];
     if (!mm) return;
-    await setState(env, uid, 'dep_note', { method: mm.name });
-    return send(env, uid, `💳 <b>${esc(mm.name)}</b>\n${esc(mm.details)}\n\nبعد ما تحوّل، ابعت هون رقم العملية / رقم المرسل للتأكيد:`);
+    await setState(env, uid, 'dep_amount', { method: mm.name });
+    return send(env, uid, `💳 <b>${esc(mm.name)}</b>\n💰 كم المبلغ يلي بدك تودعو؟ (ل.س)`, cancelKb);
   }
   if (data === 'wd') {
     await setState(env, uid, 'wd_method', {});
@@ -988,7 +1042,31 @@ async function handleCallback(env, cb) {
   }
   if (data === 'adm:proofs') { const rows = await reviewQueue(env, uid, 'admin'); return showProofs(env, uid, rows, 'adm'); }
   if (data === 'adm:deps') return adminDeps(env, uid);
-  if (cmd === 'adm' && arg === 'depok') { await setState(env, uid, 'adm_dep_amount', { dep_id: Number(arg2) }); return send(env, uid, '💰 كم المبلغ يلي بينضاف لرصيد المستخدم؟ (ل.س)'); }
+  if (data === 'adm:depmet') return adminDepMethods(env, uid);
+  if (data === 'adm:addmet') { await setState(env, uid, 'met_name', {}); return send(env, uid, '🏦 اسم وسيلة الإيداع (مثلا: سيريتل كاش / USDT TRC20):', cancelKb); }
+  if (cmd === 'adm' && arg === 'delmet') {
+    const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+    methods.splice(Number(arg2), 1);
+    await saveDepMethods(env, methods);
+    return adminDepMethods(env, uid);
+  }
+  if (cmd === 'adm' && arg === 'depshot') {
+    const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', Number(arg2));
+    if (dep?.proof_file) await tg(env, 'sendPhoto', { chat_id: uid, photo: dep.proof_file, caption: `📷 سكرين شوت إيداع #${dep.id} — ${fmt(dep.amount)} ل.س` });
+    return;
+  }
+  if (cmd === 'adm' && arg === 'depok') {
+    const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', Number(arg2));
+    if (!dep || dep.status !== 'pending') return send(env, uid, 'هالإيداع انحسم من قبل.');
+    if (dep.amount > 0) {
+      await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", dep.amount, dep.id);
+      await addBalance(env, dep.user_id, dep.amount, 'deposit', `dep:${dep.id}`);
+      await send(env, dep.user_id, `✅ <b>انضاف إيداعك!</b>\nانضاف ${fmt(dep.amount)} ل.س لرصيدك 💸`);
+      return send(env, uid, `✅ اعتمد الإيداع #${dep.id} وانضاف ${fmt(dep.amount)} ل.س للمستخدم.`);
+    }
+    await setState(env, uid, 'adm_dep_amount', { dep_id: dep.id });
+    return send(env, uid, '💰 كم المبلغ يلي بينضاف لرصيد المستخدم؟ (ل.س)');
+  }
   if (cmd === 'adm' && arg === 'deprej') {
     const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', Number(arg2));
     if (dep?.status === 'pending') { await run(env, "UPDATE deposits SET status='rejected' WHERE id=?", dep.id); await send(env, dep.user_id, '❌ انرفض طلب الإيداع تبعك. راجع الدعم.'); }
@@ -1062,6 +1140,11 @@ const SCHEMA_STATEMENTS = [
   `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]')`,
 ];
 
+const MIGRATIONS = [
+  `ALTER TABLE deposits ADD COLUMN amount INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE deposits ADD COLUMN proof_file TEXT DEFAULT ''`,
+];
+
 // ---------- Entry ----------
 export default {
   async fetch(request, env) {
@@ -1071,6 +1154,7 @@ export default {
         return new Response('forbidden', { status: 403 });
       if (!env.DB) return new Response('DB binding missing', { status: 500 });
       await env.DB.batch(SCHEMA_STATEMENTS.map((s) => env.DB.prepare(s)));
+      for (const m of MIGRATIONS) { try { await env.DB.prepare(m).run(); } catch (e) {} }
       return new Response('setup ok');
     }
     if (url.pathname === '/__whoami') {
@@ -1081,8 +1165,12 @@ export default {
     }
     if (request.method === 'POST' && url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       const upd = await request.json().catch(() => null);
-      if (upd?.message) await handleMessage(env, upd.message);
-      else if (upd?.callback_query) await handleCallback(env, upd.callback_query);
+      try {
+        if (upd?.message) await handleMessage(env, upd.message);
+        else if (upd?.callback_query) await handleCallback(env, upd.callback_query);
+      } catch (e) {
+        return new Response(`ERR: ${e?.message || e}\n${(e?.stack || '').split('\n').slice(0, 4).join('\n')}`, { status: 500 });
+      }
       return new Response('ok');
     }
     if (url.pathname === '/') return new Response('Masari bot is running.');

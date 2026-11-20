@@ -120,7 +120,7 @@ async function gate(env, uid) {
   if (isAdmin(env, uid)) return true;
   const missing = await missingChannels(env, uid);
   if (!missing.length) return true;
-  const rows = missing.map((c) => [{ text: `📢 اشترك بـ ${c.title || c.chat_ref}`, url: c.link || `https://t.me/${normRef(c.chat_ref).replace('@', '')}` }]);
+  const rows = missing.map((c) => [{ text: `📢 اشترك بـ ${c.title || c.chat_ref}`, url: (c.link && /^https:\/\/t\.me\//.test(c.link)) ? c.link : `https://t.me/${normRef(c.chat_ref).replace('@', '')}` }]);
   rows.push([{ text: '✅ تحققت — أنا اشتركت', callback_data: 'check_sub' }]);
   await send(env, uid, '⛔ <b>لازم تشترك بالقنوات التالية أولاً لتقدر تستخدم البوت:</b>', { inline_keyboard: rows });
   return false;
@@ -731,12 +731,15 @@ async function handleStateText(env, uid, st, msg) {
       await send(env, uid, `✅ انضاف التصنيف «${esc(text)}»`);
       return adminCats(env, uid);
     }
-    case 'adm_chan_ref': d.chat_ref = normRef(text); await setState(env, uid, 'adm_chan_title', d); return send(env, uid, 'اسم القناة (يلي بيظهر للمستخدم):');
-    case 'adm_chan_title': d.title = text; await setState(env, uid, 'adm_chan_link', d); return send(env, uid, 'رابط القناة (https://t.me/...):');
-    case 'adm_chan_link': {
-      await run(env, 'INSERT INTO forced_channels(chat_ref,title,link) VALUES(?,?,?)', d.chat_ref, d.title, text);
+    case 'adm_chan_ref': {
+      const ref = normRef(text);
+      const chat = await tg(env, 'getChat', { chat_id: ref });
       await clearState(env, uid);
-      await send(env, uid, '✅ انضافت القناة. تذكير: البوت لازم يكون أدمن فيها.');
+      if (!chat.ok) return send(env, uid, `⚠️ ما قدرت أوصل لهالقناة (${esc(ref)}).\nتأكد من المعرّف، وإنو البوت @masari1bot مضاف أدمن فيها (ضروري للقنوات الخاصة)، وارجع جرّب.`, backKb);
+      const title = chat.result.title || ref;
+      const link = chat.result.username ? `https://t.me/${chat.result.username}` : '';
+      await run(env, 'INSERT INTO forced_channels(chat_ref,title,link) VALUES(?,?,?)', ref, title, link);
+      await send(env, uid, `✅ انضافت القناة «${esc(title)}» للاشتراك الإجباري.`);
       return adminChans(env, uid);
     }
     case 'adm_set': {
@@ -1107,7 +1110,7 @@ async function handleCallback(env, cb) {
     return send(env, uid, '❌ انرفض السحب ورجع الرصيد.');
   }
   if (data === 'adm:chans') return adminChans(env, uid);
-  if (data === 'adm:addchan') { await setState(env, uid, 'adm_chan_ref', {}); return send(env, uid, 'معرّف القناة (@username أو الرقم أو رابط القناة):'); }
+  if (data === 'adm:addchan') { await setState(env, uid, 'adm_chan_ref', {}); return send(env, uid, '📢 ابعت <b>معرّف القناة بس</b> (@username أو الرقم أو الرابط) — وأنا بسحب اسمها وبحطو لحالي:'); }
   if (cmd === 'adm' && arg === 'delchan') { await run(env, 'DELETE FROM forced_channels WHERE id=?', Number(arg2)); return adminChans(env, uid); }
   if (data === 'adm:tickets') {
     const rows = await all(env, "SELECT * FROM tickets WHERE status='open' ORDER BY id DESC LIMIT 10");

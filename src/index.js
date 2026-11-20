@@ -252,20 +252,16 @@ async function referral(env, uid) {
 
 // ---------- Client price list (services, client-facing prices only) ----------
 async function priceList(env, uid) {
-  const svcs = await all(env, `SELECT s.*, c.name cname, p.name pname FROM services s
-    LEFT JOIN categories c ON c.id=s.category_id LEFT JOIN categories p ON p.id=c.parent_id
-    WHERE s.is_active=1 ORDER BY c.parent_id, c.id, s.id`);
-  const kb = backKb;
-  if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', kb);
-  let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر عن كل تنفيذ واحد:\n';
-  let lastCat = '';
-  for (const s of svcs) {
-    const cat = `${s.pname ? esc(s.pname) + ' / ' : ''}${esc(s.cname || 'بدون تصنيف')}`;
-    if (cat !== lastCat) { txt += `\n🗂 <b>${cat}</b>\n`; lastCat = cat; }
-    txt += `• ${esc(s.name)} — <b>${fmt(s.price)} ل.س</b>\n`;
+  const offers = await all(env, 'SELECT * FROM offers WHERE is_active=1 ORDER BY id');
+  if (!offers.length) return send(env, uid, '💰 ما في خدمات ثابتة منشورة حالياً. تابعنا 👌', backKb);
+  let txt = '💰 <b>قائمة الأسعار</b>\nخدماتنا الثابتة — اضغط على أي خدمة لتشوف شرحها وتشتري:\n';
+  const kb = [];
+  for (const o of offers) {
+    txt += `\n• <b>${esc(o.name)}</b> — ${fmt(o.price)} ل.س`;
+    kb.push([{ text: `🛒 ${o.name} — ${fmt(o.price)} ل.س`, callback_data: `ofr:${o.id}` }]);
   }
-  txt += '\nللطلب روح «➕ اطلب خدمة» واختار من القائمة 👌';
-  await send(env, uid, txt, kb);
+  kb.push([{ text: '⬅️ رجوع', callback_data: 'home' }]);
+  await send(env, uid, txt, { inline_keyboard: kb });
 }
 
 // ---------- Admin category tree (drill-down: main -> subs -> services) ----------
@@ -314,25 +310,54 @@ async function adminSvcView(env, uid, svcId) {
   return send(env, uid, txt, { inline_keyboard: kb });
 }
 
-async function adminPrices(env, uid) {
+// ---------- Fixed offers: the price list (admin-managed inside إدارة الأسعار only) ----------
+async function adminOffers(env, uid) {
   if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
-  const cats = await all(env, 'SELECT c.*, p.name pname FROM categories c LEFT JOIN categories p ON p.id=c.parent_id ORDER BY c.parent_id, c.id');
-  const svcs = await all(env, 'SELECT * FROM services ORDER BY category_id, id');
-  if (!svcs.length) return send(env, uid, '💰 <b>قائمة الأسعار</b>\n\nما في مهام/خدمات لسا — ضيفها من التصنيفات.', { inline_keyboard: [[{ text: '🗂 التصنيفات', callback_data: 'adm:cats' }], [{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
-  const byCat = {};
-  svcs.forEach((s) => { (byCat[s.category_id] = byCat[s.category_id] || []).push(s); });
-  let txt = '💰 <b>قائمة الأسعار</b> (اضغط على أي مهمة لتعديل سعرها):\n';
+  const offers = await all(env, 'SELECT * FROM offers ORDER BY id');
+  let txt = '💰 <b>إدارة الأسعار — الخدمات الثابتة</b>\nهي القائمة يلي بيشوفها العميل بـ «قائمة الأسعار» وبيشتري منها:\n';
+  if (!offers.length) txt += '\nما في خدمات ثابتة بعد — ضيف أول وحدة من الزر تحت 👇';
   const kb = [];
-  for (const c of cats) {
-    const list = byCat[c.id] || [];
-    if (!list.length) continue;
-    txt += `\n<b>${c.parent_id ? `↳ ${esc(c.pname)} / ` : '📁 '}${esc(c.name)}</b>`;
-    for (const s of list) {
-      txt += `\n• ${esc(s.name)} — العميل: <b>${fmt(s.price)}</b> · العامل: <b>${fmt(s.pay)}</b>`;
-      kb.push([{ text: `✏️ ${s.name}`, callback_data: `adm:svc:${s.id}` }]);
-    }
+  for (const o of offers) {
+    txt += `\n• <b>${esc(o.name)}</b> — ${fmt(o.price)} ل.س`;
+    kb.push([{ text: `✏️ سعر «${o.name}»`, callback_data: `adm:ofrprice:${o.id}` }, { text: `✏️ شرح «${o.name}»`, callback_data: `adm:ofrdet:${o.id}` }]);
+    kb.push([{ text: `🗑 حذف «${o.name}»`, callback_data: `adm:delofr:${o.id}` }]);
   }
+  kb.push([{ text: '➕ إضافة خدمة ثابتة', callback_data: 'adm:addofr' }]);
   kb.push([{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]);
+  return send(env, uid, txt, { inline_keyboard: kb });
+}
+
+async function adminBuys(env, uid) {
+  if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+  const rows = await all(env, 'SELECT * FROM purchases ORDER BY id DESC LIMIT 15');
+  if (!rows.length) return send(env, uid, '🧾 ما في مشتريات لسا.', { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
+  const stTxt = { awaiting_payment: '⏳ بانتظار الدفع', paid: '✅ مدفوع — بانتظار التسليم', delivered: '📦 تم التسليم', cancelled: '❌ ملغي' };
+  for (const p of rows) {
+    const kb = p.status === 'paid' ? { inline_keyboard: [[{ text: '📦 تم التسليم', callback_data: `adm:buydone:${p.id}` }]] } : undefined;
+    await send(env, uid, `🧾 <b>شراء #${p.id}</b> — ${esc(p.offer_name)} × ${p.qty}\nالمجموع: ${fmt(p.total)} ل.س\nالعميل: ${p.user_id}\nالحالة: ${stTxt[p.status] || p.status}`, kb);
+  }
+  return send(env, uid, '🧾 آخر المشتريات 👆', { inline_keyboard: [[{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
+}
+
+async function offerView(env, uid, offerId) {
+  const o = await one(env, 'SELECT * FROM offers WHERE id=? AND is_active=1', offerId);
+  if (!o) return priceList(env, uid);
+  const txt = `🛒 <b>${esc(o.name)}</b>\n\n${esc(o.details || '')}\n\n💵 السعر: <b>${fmt(o.price)} ل.س</b> للوحدة\n\nهل تريد الشراء؟`;
+  return send(env, uid, txt, { inline_keyboard: [
+    [{ text: '✅ نعم، بدي اشتري', callback_data: `ofrbuy:${o.id}` }],
+    [{ text: '⬅️ رجوع لقائمة الأسعار', callback_data: 'prices' }],
+  ]});
+}
+
+async function offerPayScreen(env, uid, purchase) {
+  const u = await getUser(env, uid);
+  const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+  let txt = `🧾 <b>ملخص الشراء</b>\nالخدمة: ${esc(purchase.offer_name)}\nالعدد: ${purchase.qty}\n<b>المجموع: ${fmt(purchase.total)} ل.س</b>\n\nاختار طريقة الدفع:`;
+  const kb = [];
+  if (u && u.balance >= purchase.total) kb.push([{ text: `💰 ادفع من رصيدي (${fmt(u.balance)} ل.س)`, callback_data: `ofrpay:${purchase.id}` }]);
+  methods.forEach((mm, i) => kb.push([{ text: `💳 إيداع عبر ${mm.name}`, callback_data: `ofrdm:${purchase.id}:${i}` }]));
+  if (!methods.length && !kb.length) txt += '\n\n⚠️ ما في وسائل دفع مفعّلة حالياً — راجع الدعم.';
+  kb.push([{ text: '❌ إلغاء الشراء', callback_data: `ofrcancel:${purchase.id}` }]);
   return send(env, uid, txt, { inline_keyboard: kb });
 }
 
@@ -439,8 +464,8 @@ const adminKb = { inline_keyboard: [
 ]};
 const adminWorkKb = { inline_keyboard: [
   [{ text: '🗂 التصنيفات والمهام', callback_data: 'adm:cats' }],
-  [{ text: '💰 إدارة الأسعار', callback_data: 'adm:prices' }, { text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }],
-  [{ text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
+  [{ text: '💰 إدارة الأسعار', callback_data: 'adm:prices' }, { text: '🧾 مشتريات العملاء', callback_data: 'adm:buys' }],
+  [{ text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
   [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
@@ -743,6 +768,62 @@ async function handleStateText(env, uid, st, msg) {
       }
       return;
     }
+    case 'ofr_qty': {
+      const qty = parseNum(text);
+      if (!qty || qty < 1) return send(env, uid, '⚠️ اكتب عدد صحيح أكبر من صفر:', cancelKb);
+      const o = await one(env, 'SELECT * FROM offers WHERE id=? AND is_active=1', d.offer_id);
+      if (!o) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.', backKb); }
+      const total = o.price * qty;
+      const r = await run(env, 'INSERT INTO purchases(user_id,offer_id,offer_name,qty,total,created_at) VALUES(?,?,?,?,?,?)', uid, o.id, o.name, qty, total, now());
+      const p = await one(env, 'SELECT * FROM purchases WHERE id=?', r.meta.last_row_id);
+      await clearState(env, uid);
+      return offerPayScreen(env, uid, p);
+    }
+    case 'ofr_shot': {
+      const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : '';
+      if (!fileId && !text) return send(env, uid, '📸 ابعت سكرين شوت التحويل (أو رقم العملية كنص):', cancelKb);
+      const p = await one(env, "SELECT * FROM purchases WHERE id=? AND user_id=? AND status='awaiting_payment'", d.purchase_id, uid);
+      if (!p) { await clearState(env, uid); return send(env, uid, '⚠️ هالشراء انحسم أو انلغى.', backKb); }
+      const r = await run(env, 'INSERT INTO deposits(user_id,method,note,amount,proof_file,ref,created_at) VALUES(?,?,?,?,?,?,?)', uid, d.method, `شراء: ${p.offer_name} × ${p.qty}`, p.total, fileId, `purchase:${p.id}`, now());
+      const depId = r.meta.last_row_id;
+      await run(env, 'UPDATE purchases SET deposit_id=? WHERE id=?', depId, p.id);
+      await clearState(env, uid);
+      await send(env, uid, '✅ وصل إثبات الدفع للإدارة. بس يعتمدوه بيتم شراؤك وبيوصلك إشعار.', await mainKb(env, uid));
+      if (env.ADMIN_ID) {
+        const cap = `💰 <b>إيداع لشراء #${depId}</b>\n🧾 الشراء: ${esc(p.offer_name)} × ${p.qty} = <b>${fmt(p.total)} ل.س</b>\nمن: ${uid}\nالطريقة: ${esc(d.method)}\nباعتمادك هالإيداع بيتم الشراء لحالو (ما بينضاف للرصيد).`;
+        const kb = { inline_keyboard: [[
+          { text: `✅ اعتماد ${fmt(p.total)} ل.س`, callback_data: `adm:depok:${depId}` },
+          { text: '❌ رفض', callback_data: `adm:deprej:${depId}` },
+        ]] };
+        if (fileId) await tg(env, 'sendPhoto', { chat_id: env.ADMIN_ID, photo: fileId, caption: cap, parse_mode: 'HTML', reply_markup: kb });
+        else await send(env, env.ADMIN_ID, `${cap}\nرقم العملية: ${esc(text)}`, kb);
+      }
+      return;
+    }
+    case 'ofr_name': d.name = text; await setState(env, uid, 'ofr_details', d); return send(env, uid, '📝 ابعت شرح الخدمة (يلي بيشوفو العميل قبل الشراء) — أو «-» إذا ما في:', cancelKb);
+    case 'ofr_details': d.details = text === '-' ? '' : text; await setState(env, uid, 'ofr_price', d); return send(env, uid, '💵 سعر الوحدة (ل.س):', cancelKb);
+    case 'ofr_price': {
+      const v = parseNum(text);
+      if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb);
+      await run(env, 'INSERT INTO offers(name,details,price) VALUES(?,?,?)', d.name, d.details || '', v);
+      await clearState(env, uid);
+      await send(env, uid, `✅ انضافت الخدمة الثابتة «${esc(d.name)}» لقائمة الأسعار.`);
+      return adminOffers(env, uid);
+    }
+    case 'adm_ofr_price': {
+      const v = parseNum(text);
+      if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb);
+      await run(env, 'UPDATE offers SET price=? WHERE id=?', v, d.offer_id);
+      await clearState(env, uid);
+      await send(env, uid, `✅ اتعدّل السعر لـ ${fmt(v)} ل.س.`);
+      return adminOffers(env, uid);
+    }
+    case 'adm_ofr_details': {
+      await run(env, 'UPDATE offers SET details=? WHERE id=?', text === '-' ? '' : text, d.offer_id);
+      await clearState(env, uid);
+      await send(env, uid, '✅ اتعدّل الشرح.');
+      return adminOffers(env, uid);
+    }
     case 'met_name': d.name = text; await setState(env, uid, 'met_details', d); return send(env, uid, '📍 ابعت تفاصيل التحويل لهالوسيلة (الرقم / العنوان / الرابط + أي تعليمات) — هي يلي بتظهر للمستخدم بعد ما يحدد المبلغ:', cancelKb);
     case 'met_details': {
       const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
@@ -954,6 +1035,8 @@ async function handleMessage(env, msg) {
       let txt = '📦 <b>طلباتك:</b>\n';
       txt += rows.length ? rows.map((o) => `• #${o.id} — ${{ new: '⏳ عند الإدارة', converted: '✅ اتحول لمهمة', rejected: '❌ مرفوض' }[o.status]}`).join('\n') : 'ما عندك طلبات.';
       if (myT.length) txt += '\n\n<b>مهامك المنشورة:</b>\n' + myT.map((t) => `• «${esc(t.title)}» — ${t.slots_done}/${t.slots_total} ${t.status === 'open' ? '(شغالة)' : '(مسكرة)'}`).join('\n');
+      const myP = await all(env, 'SELECT * FROM purchases WHERE user_id=? ORDER BY id DESC LIMIT 10', uid);
+      if (myP.length) txt += '\n\n<b>مشترياتك من قائمة الأسعار:</b>\n' + myP.map((p) => `• «${esc(p.offer_name)}» × ${p.qty} — ${fmt(p.total)} ل.س — ${{ awaiting_payment: '⏳ بانتظار الدفع', paid: '✅ مدفوع/قيد التنفيذ', delivered: '📦 تم التسليم', cancelled: '❌ ملغي' }[p.status]}`).join('\n');
       const pending = await one(env, `SELECT COUNT(*) n FROM claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.status='submitted' AND t.reviewer='client' AND t.client_id=?`, uid);
       const kbRows = [];
@@ -1008,6 +1091,37 @@ async function handleCallback(env, cb) {
   if (data === 'cancel') { await clearState(env, uid); return send(env, uid, '❌ انلغت العملية.', await mainKb(env, uid)); }
   if (data === 'cats') return listCategories(env, uid);
   if (data === 'prices') return priceList(env, uid);
+  if (cmd === 'ofr') return offerView(env, uid, Number(arg));
+  if (cmd === 'ofrbuy') {
+    const o = await one(env, 'SELECT * FROM offers WHERE id=? AND is_active=1', Number(arg));
+    if (!o) return;
+    await setState(env, uid, 'ofr_qty', { offer_id: o.id });
+    return send(env, uid, `🔢 كم العدد المطلوب من «${esc(o.name)}»؟ (اكتب الرقم بس)`, cancelKb);
+  }
+  if (cmd === 'ofrpay') {
+    const p = await one(env, "SELECT * FROM purchases WHERE id=? AND user_id=? AND status='awaiting_payment'", Number(arg), uid);
+    if (!p) return send(env, uid, 'هالشراء انحسم أو انلغى.', backKb);
+    const u = await getUser(env, uid);
+    if (!u || u.balance < p.total) return send(env, uid, '⚠️ رصيدك ما بيكفي.', backKb);
+    await addBalance(env, uid, -p.total, 'purchase', `purchase:${p.id}`);
+    await run(env, "UPDATE purchases SET status='paid' WHERE id=?", p.id);
+    await send(env, uid, `✅ <b>تم الشراء!</b>\n${esc(p.offer_name)} × ${p.qty} — انخصم ${fmt(p.total)} ل.س.\nطلبك صار عند الإدارة وبيتنفذ بأقرب وقت 👌`, await mainKb(env, uid));
+    if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `🧾 <b>شراء مدفوع #${p.id}</b>\n${esc(p.offer_name)} × ${p.qty} = ${fmt(p.total)} ل.س (من رصيد العميل ${uid})\nنفّذ الطلب وسلّمو من «مشتريات العملاء».`);
+    return;
+  }
+  if (cmd === 'ofrdm') {
+    const p = await one(env, "SELECT * FROM purchases WHERE id=? AND user_id=? AND status='awaiting_payment'", Number(arg), uid);
+    if (!p) return send(env, uid, 'هالشراء انحسم أو انلغى.', backKb);
+    const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
+    const mm = methods[Number(arg2)];
+    if (!mm) return;
+    await setState(env, uid, 'ofr_shot', { purchase_id: p.id, method: mm.name });
+    return send(env, uid, `💳 حوّل <b>${fmt(p.total)} ل.س</b> عبر «${esc(mm.name)}» لهون:\n${esc(mm.details || '')}\n\n📸 بعد ما تحوّل، ابعت <b>سكرين شوت</b> التحويل هون (أو رقم العملية كنص).`, cancelKb);
+  }
+  if (cmd === 'ofrcancel') {
+    await run(env, "UPDATE purchases SET status='cancelled' WHERE id=? AND user_id=? AND status='awaiting_payment'", Number(arg), uid);
+    return send(env, uid, '❌ انلغى الشراء.', backKb);
+  }
   if (cmd === 'cat') {
     const catId = Number(arg);
     const subs = await all(env, 'SELECT * FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id', catId);
@@ -1167,7 +1281,17 @@ async function handleCallback(env, cb) {
     await setState(env, uid, 'tw_title', { client_id: null, category_id: Number(arg2) });
     return send(env, uid, '➕ <b>مهمة جديدة</b> (التصنيف محدد جاهز)\nعنوان المهمة:');
   }
-  if (data === 'adm:prices') return adminPrices(env, uid);
+  if (data === 'adm:prices') return adminOffers(env, uid);
+  if (data === 'adm:buys') return adminBuys(env, uid);
+  if (data === 'adm:addofr') { await setState(env, uid, 'ofr_name', {}); return send(env, uid, '🛒 اسم الخدمة الثابتة (متل ما بيشوفها العميل بقائمة الأسعار):', cancelKb); }
+  if (cmd === 'adm' && arg === 'ofrprice') { await setState(env, uid, 'adm_ofr_price', { offer_id: Number(arg2) }); return send(env, uid, '✏️ ابعت السعر الجديد للوحدة (ل.س):', cancelKb); }
+  if (cmd === 'adm' && arg === 'ofrdet') { await setState(env, uid, 'adm_ofr_details', { offer_id: Number(arg2) }); return send(env, uid, '✏️ ابعت الشرح الجديد (أو «-» لمسحو):', cancelKb); }
+  if (cmd === 'adm' && arg === 'delofr') { await run(env, 'DELETE FROM offers WHERE id=?', Number(arg2)); await send(env, uid, '🗑 انحذفت الخدمة الثابتة.'); return adminOffers(env, uid); }
+  if (cmd === 'adm' && arg === 'buydone') {
+    const p = await one(env, "SELECT * FROM purchases WHERE id=? AND status='paid'", Number(arg2));
+    if (p) { await run(env, "UPDATE purchases SET status='delivered' WHERE id=?", p.id); await send(env, p.user_id, `📦 <b>تم تسليم طلبك!</b>\n${esc(p.offer_name)} × ${p.qty} — اكتمل الشراء #${p.id} ✅`); return send(env, uid, '📦 تسجل كمُسلَّم.'); }
+    return send(env, uid, 'هالشراء انحسم من قبل.');
+  }
   if (data === 'adm:cats') return adminCats(env, uid);
   if (cmd === 'adm' && arg === 'cat') return adminCatView(env, uid, Number(arg2));
   if (cmd === 'adm' && arg === 'sub') return adminSubView(env, uid, Number(arg2));
@@ -1238,6 +1362,17 @@ async function handleCallback(env, cb) {
   if (cmd === 'adm' && arg === 'depok') {
     const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', Number(arg2));
     if (!dep || dep.status !== 'pending') return send(env, uid, 'هالإيداع انحسم من قبل.');
+    if (dep.ref && dep.ref.startsWith('purchase:')) {
+      const pid = Number(dep.ref.slice(9));
+      const p = await one(env, "SELECT * FROM purchases WHERE id=? AND status='awaiting_payment'", pid);
+      await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", dep.amount, dep.id);
+      if (p) {
+        await run(env, "UPDATE purchases SET status='paid' WHERE id=?", p.id);
+        await send(env, dep.user_id, `✅ <b>تم الشراء!</b>\nانقبل دفعك وصار طلبك «${esc(p.offer_name)} × ${p.qty}» قيد التنفيذ عند الإدارة 👌`);
+        return send(env, uid, `✅ اعتمد إيداع الشراء — الشراء #${p.id} صار مدفوع وبانتظار تسليمك.`);
+      }
+      return send(env, uid, '✅ اعتمد الإيداع (الشراء ما عاد بانتظار الدفع).');
+    }
     if (dep.amount > 0) {
       await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", dep.amount, dep.id);
       await addBalance(env, dep.user_id, dep.amount, 'deposit', `dep:${dep.id}`);
@@ -1249,7 +1384,16 @@ async function handleCallback(env, cb) {
   }
   if (cmd === 'adm' && arg === 'deprej') {
     const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', Number(arg2));
-    if (dep?.status === 'pending') { await run(env, "UPDATE deposits SET status='rejected' WHERE id=?", dep.id); await send(env, dep.user_id, '❌ انرفض طلب الإيداع تبعك. راجع الدعم.'); }
+    if (dep?.status === 'pending') {
+      await run(env, "UPDATE deposits SET status='rejected' WHERE id=?", dep.id);
+      if (dep.ref && dep.ref.startsWith('purchase:')) {
+        const pid = Number(dep.ref.slice(9));
+        await run(env, "UPDATE purchases SET status='cancelled' WHERE id=? AND status='awaiting_payment'", pid);
+        await send(env, dep.user_id, '❌ انرفض إثبات دفع الشراء وانلغى الطلب. راجع الدعم.');
+      } else {
+        await send(env, dep.user_id, '❌ انرفض طلب الإيداع تبعك. راجع الدعم.');
+      }
+    }
     return send(env, uid, '❌ انرفض الإيداع.');
   }
   if (data === 'adm:wds') return adminWds(env, uid);
@@ -1317,6 +1461,8 @@ const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS forced_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_ref TEXT NOT NULL, title TEXT DEFAULT '', link TEXT DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, ref TEXT DEFAULT '', message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS ustate (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}')`,
+  `CREATE TABLE IF NOT EXISTS offers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, details TEXT DEFAULT '', price INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, offer_id INTEGER, offer_name TEXT DEFAULT '', qty INTEGER NOT NULL DEFAULT 1, total INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'awaiting_payment', deposit_id INTEGER, created_at INTEGER NOT NULL DEFAULT 0)`,
   `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]')`,
 ];
 
@@ -1324,6 +1470,7 @@ const MIGRATIONS = [
   `ALTER TABLE deposits ADD COLUMN amount INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deposits ADD COLUMN proof_file TEXT DEFAULT ''`,
   `ALTER TABLE users ADD COLUMN role TEXT DEFAULT ''`,
+  `ALTER TABLE deposits ADD COLUMN ref TEXT DEFAULT ''`,
 ];
 
 // ---------- Entry ----------
@@ -1356,6 +1503,23 @@ export default {
       const cats = await all(env, 'SELECT id,parent_id,name FROM categories ORDER BY id');
       const svcs = await all(env, 'SELECT id,category_id,name,price,pay FROM services ORDER BY id');
       return new Response(JSON.stringify({ cats, svcs }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/__dbg') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)
+        return new Response('forbidden', { status: 403 });
+      const dm = await env.DB.prepare("SELECT value FROM settings WHERE key='deposit_methods'").first();
+      const dbg = await env.DB.prepare("SELECT value FROM settings WHERE key='dbg_state'").first();
+      const states = await all(env, 'SELECT * FROM ustate');
+      const offers = await all(env, 'SELECT * FROM offers');
+      return new Response(JSON.stringify({ deposit_methods: dm?.value ?? null, dbg_state: dbg?.value ?? null, states, offers }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/__buys') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)
+        return new Response('forbidden', { status: 403 });
+      const offers = await all(env, 'SELECT id,name,price FROM offers ORDER BY id');
+      const purchases = await all(env, 'SELECT id,user_id,offer_name,qty,total,status,deposit_id FROM purchases ORDER BY id');
+      const deposits = await all(env, 'SELECT id,user_id,amount,status,ref FROM deposits ORDER BY id');
+      return new Response(JSON.stringify({ offers, purchases, deposits }), { headers: { 'Content-Type': 'application/json' } });
     }
     if (url.pathname === '/__whoami') {
       if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET)

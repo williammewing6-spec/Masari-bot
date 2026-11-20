@@ -364,7 +364,7 @@ const adminWorkKb = { inline_keyboard: [
 ]};
 const adminMoneyKb = { inline_keyboard: [
   [{ text: '💰 إيداعات معلقة', callback_data: 'adm:deps' }, { text: '💸 سحوبات معلقة', callback_data: 'adm:wds' }],
-  [{ text: '🏦 وسائل الإيداع', callback_data: 'adm:depmet' }],
+  [{ text: '🏦 وسائل الإيداع', callback_data: 'adm:depmet' }, { text: '💸 وسائل السحب', callback_data: 'adm:wdmet' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
 const adminPeopleKb = { inline_keyboard: [
@@ -469,6 +469,24 @@ async function adminDepMethods(env, uid) {
 
 async function saveDepMethods(env, methods) {
   await run(env, "INSERT INTO settings(key,value) VALUES('deposit_methods',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(methods));
+}
+
+async function adminWdMethods(env, uid) {
+  const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+  let txt = '💸 <b>وسائل السحب</b>\nهي الوسائل يلي بيشوفها المستخدم وقت يختار «➖ سحب» من محفظتو:\n';
+  if (!methods.length) txt += '\nما في وسائل بعد — ضيف أول وسيلة من الزر تحت 👇\n(إذا ما في وسائل، المستخدم بيكتب الوسيلة كتابة متل قبل.)';
+  const kb = [];
+  methods.forEach((mm, i) => {
+    txt += `\n• <b>${esc(mm.name)}</b>${mm.details ? `\n${esc(mm.details)}` : ''}`;
+    kb.push([{ text: `🗑 حذف «${mm.name}»`, callback_data: `adm:delwmet:${i}` }]);
+  });
+  kb.push([{ text: '➕ وسيلة سحب جديدة', callback_data: 'adm:addwmet' }]);
+  kb.push([{ text: '⬅️ رجوع', callback_data: 'adm:home' }]);
+  return send(env, uid, txt, { inline_keyboard: kb });
+}
+
+async function saveWdMethods(env, methods) {
+  await run(env, "INSERT INTO settings(key,value) VALUES('withdraw_methods',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(methods));
 }
 
 async function adminDeps(env, uid) {
@@ -670,6 +688,36 @@ async function handleStateText(env, uid, st, msg) {
       await clearState(env, uid);
       await send(env, uid, `✅ انضافت وسيلة «${esc(d.name)}».`);
       return adminDepMethods(env, uid);
+    }
+    case 'wmet_name': d.name = text; await setState(env, uid, 'wmet_details', d); return send(env, uid, '📍 ابعت تعليمات هالوسيلة للمستخدم (مثلا: الرقم لازم يبدأ بـ 09) — أو «-» إذا ما في:', cancelKb);
+    case 'wmet_details': {
+      const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+      methods.push({ name: d.name, details: text === '-' ? '' : text });
+      await saveWdMethods(env, methods);
+      await clearState(env, uid);
+      await send(env, uid, `✅ انضافت وسيلة سحب «${esc(d.name)}».`);
+      return adminWdMethods(env, uid);
+    }
+    case 'wd_amount2': {
+      const amt = parseNum(text);
+      const u = await getUser(env, uid);
+      const minW = Number(await setting(env, 'min_withdraw', '25000'));
+      if (!amt || amt < minW) return send(env, uid, `⚠️ الحد الأدنى للسحب ${fmt(minW)} ل.س — ابعت مبلغ صحيح:`, cancelKb);
+      if (amt > u.balance) return send(env, uid, `⚠️ المبلغ أكبر من رصيدك (${fmt(u.balance)} ل.س) — ابعت مبلغ أصغر:`, cancelKb);
+      d.amount = amt; await setState(env, uid, 'wd_details2', d);
+      const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+      const mm = methods.find((x) => x.name === d.method);
+      return send(env, uid, `📍 ابعت الرقم/العنوان يلي بدك التحويل عليه:${mm?.details ? `\n${esc(mm.details)}` : ''}`, cancelKb);
+    }
+    case 'wd_details2': {
+      const u = await getUser(env, uid);
+      if (!d.amount || d.amount > u.balance) { await clearState(env, uid); return send(env, uid, '⚠️ رصيدك ما بيكفي لهالمبلغ.', mainKb(env, uid)); }
+      await addBalance(env, uid, -d.amount, 'withdraw', 'request');
+      const r = await run(env, 'INSERT INTO withdrawals(user_id,method,details,amount,created_at) VALUES(?,?,?,?,?)', uid, d.method, text, d.amount, now());
+      await clearState(env, uid);
+      await send(env, uid, '✅ تسجّل طلب السحب وصار عند الإدارة. بيوصلك إشعار بس يتنفذ.', mainKb(env, uid));
+      if (env.ADMIN_ID) await send(env, env.ADMIN_ID, `💸 طلب سحب جديد #${r.meta.last_row_id}: ${fmt(d.amount)} ل.س عبر «${esc(d.method)}» من ${uid}\nالتفاصيل: ${esc(text)}`);
+      return;
     }
     case 'wd_method': d.method = text; await setState(env, uid, 'wd_details', d); return send(env, uid, '📍 ابعت الرقم/العنوان يلي بدك التحويل عليه:');
     case 'wd_details': d.details = text; await setState(env, uid, 'wd_amount', d); return send(env, uid, '💸 كم المبلغ؟ (ل.س)');
@@ -980,8 +1028,22 @@ async function handleCallback(env, cb) {
     return send(env, uid, `💳 <b>${esc(mm.name)}</b>\n💰 كم المبلغ يلي بدك تودعو؟ (ل.س)`, cancelKb);
   }
   if (data === 'wd') {
-    await setState(env, uid, 'wd_method', {});
-    return send(env, uid, '➖ <b>سحب</b>\nاكتب وسيلة السحب (مثلا: سيريتل كاش / USDT TRC20):');
+    const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+    if (!methods.length) {
+      await setState(env, uid, 'wd_method', {});
+      return send(env, uid, '➖ <b>سحب</b>\nاكتب وسيلة السحب (مثلا: سيريتل كاش / USDT TRC20):');
+    }
+    const rows = methods.map((mm, i) => [{ text: `💸 ${mm.name}`, callback_data: `wdm:${i}` }]);
+    rows.push([{ text: '❌ إلغاء', callback_data: 'cancel' }]);
+    return send(env, uid, '➖ <b>سحب</b> — اختار الوسيلة:', { inline_keyboard: rows });
+  }
+  if (cmd === 'wdm') {
+    const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+    const mm = methods[Number(arg)];
+    if (!mm) return;
+    await setState(env, uid, 'wd_amount2', { method: mm.name });
+    const minW = Number(await setting(env, 'min_withdraw', '25000'));
+    return send(env, uid, `💸 <b>${esc(mm.name)}</b>\n💰 كم المبلغ يلي بدك تسحبو؟ (ل.س) — الحد الأدنى ${fmt(minW)} ل.س`, cancelKb);
   }
 
   // ---------- Admin ----------
@@ -1064,6 +1126,14 @@ async function handleCallback(env, cb) {
   }
   if (data === 'adm:proofs') { const rows = await reviewQueue(env, uid, 'admin'); return showProofs(env, uid, rows, 'adm'); }
   if (data === 'adm:deps') return adminDeps(env, uid);
+  if (data === 'adm:wdmet') return adminWdMethods(env, uid);
+  if (data === 'adm:addwmet') { await setState(env, uid, 'wmet_name', {}); return send(env, uid, '💸 اسم وسيلة السحب (مثلا: سيريتل كاش / USDT TRC20):', cancelKb); }
+  if (cmd === 'adm' && arg === 'delwmet') {
+    const methods = JSON.parse(await setting(env, 'withdraw_methods', '[]'));
+    methods.splice(Number(arg2), 1);
+    await saveWdMethods(env, methods);
+    return adminWdMethods(env, uid);
+  }
   if (data === 'adm:depmet') return adminDepMethods(env, uid);
   if (data === 'adm:addmet') { await setState(env, uid, 'met_name', {}); return send(env, uid, '🏦 اسم وسيلة الإيداع (مثلا: سيريتل كاش / USDT TRC20):', cancelKb); }
   if (cmd === 'adm' && arg === 'delmet') {

@@ -225,7 +225,7 @@ async function priceList(env, uid) {
     LEFT JOIN categories c ON c.id=s.category_id LEFT JOIN categories p ON p.id=c.parent_id
     WHERE s.is_active=1 ORDER BY c.parent_id, c.id, s.id`);
   const kb = isAdmin(env, uid)
-    ? { inline_keyboard: [[{ text: '🛠 إدارة التصنيفات والأسعار', callback_data: 'adm:cats' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] }
+    ? { inline_keyboard: [[{ text: '🛠 إدارة الأسعار', callback_data: 'adm:prices' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] }
     : backKb;
   if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', kb);
   let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر عن كل تنفيذ واحد:\n';
@@ -282,6 +282,27 @@ async function adminSvcView(env, uid, svcId) {
     [{ text: '🗑 حذف المهمة', callback_data: `adm:delsvc2:${s.id}` }],
     [{ text: '⬅️ رجوع', callback_data: `adm:back2cat:${s.category_id}` }],
   ];
+  return send(env, uid, txt, { inline_keyboard: kb });
+}
+
+async function adminPrices(env, uid) {
+  const cats = await all(env, 'SELECT c.*, p.name pname FROM categories c LEFT JOIN categories p ON p.id=c.parent_id ORDER BY c.parent_id, c.id');
+  const svcs = await all(env, 'SELECT * FROM services ORDER BY category_id, id');
+  if (!svcs.length) return send(env, uid, '💰 <b>قائمة الأسعار</b>\n\nما في مهام/خدمات لسا — ضيفها من التصنيفات.', { inline_keyboard: [[{ text: '🗂 التصنيفات', callback_data: 'adm:cats' }], [{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]] });
+  const byCat = {};
+  svcs.forEach((s) => { (byCat[s.category_id] = byCat[s.category_id] || []).push(s); });
+  let txt = '💰 <b>قائمة الأسعار</b> (اضغط على أي مهمة لتعديل سعرها):\n';
+  const kb = [];
+  for (const c of cats) {
+    const list = byCat[c.id] || [];
+    if (!list.length) continue;
+    txt += `\n<b>${c.parent_id ? `↳ ${esc(c.pname)} / ` : '📁 '}${esc(c.name)}</b>`;
+    for (const s of list) {
+      txt += `\n• ${esc(s.name)} — العميل: <b>${fmt(s.price)}</b> · العامل: <b>${fmt(s.pay)}</b>`;
+      kb.push([{ text: `✏️ ${s.name}`, callback_data: `adm:svc:${s.id}` }]);
+    }
+  }
+  kb.push([{ text: '⬅️ رجوع', callback_data: 'adm:grp:work' }]);
   return send(env, uid, txt, { inline_keyboard: kb });
 }
 
@@ -387,7 +408,8 @@ const adminKb = { inline_keyboard: [
   [{ text: '👥 المستخدمين والدعم', callback_data: 'adm:grp:people' }, { text: '⚙️ النظام', callback_data: 'adm:grp:sys' }],
 ]};
 const adminWorkKb = { inline_keyboard: [
-  [{ text: '🗂 التصنيفات والمهام', callback_data: 'adm:cats' }, { text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }],
+  [{ text: '🗂 التصنيفات والمهام', callback_data: 'adm:cats' }],
+  [{ text: '💰 إدارة الأسعار', callback_data: 'adm:prices' }, { text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }],
   [{ text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
   [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
@@ -1097,6 +1119,7 @@ async function handleCallback(env, cb) {
     await setState(env, uid, 'tw_title', { client_id: null, category_id: Number(arg2) });
     return send(env, uid, '➕ <b>مهمة جديدة</b> (التصنيف محدد جاهز)\nعنوان المهمة:');
   }
+  if (data === 'adm:prices') return adminPrices(env, uid);
   if (data === 'adm:cats') return adminCats(env, uid);
   if (cmd === 'adm' && arg === 'cat') return adminCatView(env, uid, Number(arg2));
   if (cmd === 'adm' && arg === 'sub') return adminSubView(env, uid, Number(arg2));

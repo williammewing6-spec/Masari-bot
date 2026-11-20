@@ -16,9 +16,21 @@ const parseNum = (s) => {
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // ---------- Telegram API ----------
+let _tok = null;
+async function botToken(env) {
+  if (_tok) return _tok;
+  try {
+    const row = await one(env, "SELECT value FROM settings WHERE key='bot_token'");
+    if (row && row.value) { _tok = row.value; return _tok; }
+  } catch (e) { /* settings table not ready yet */ }
+  _tok = env.BOT_TOKEN || '';
+  return _tok;
+}
+
 async function tg(env, method, body = {}) {
   try {
-    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    const token = await botToken(env);
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -192,7 +204,10 @@ async function priceList(env, uid) {
   const svcs = await all(env, `SELECT s.*, c.name cname, p.name pname FROM services s
     LEFT JOIN categories c ON c.id=s.category_id LEFT JOIN categories p ON p.id=c.parent_id
     WHERE s.is_active=1 ORDER BY c.parent_id, c.id, s.id`);
-  if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', backKb);
+  const kb = isAdmin(env, uid)
+    ? { inline_keyboard: [[{ text: '🛠 إدارة الأسعار', callback_data: 'adm:prices' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] }
+    : backKb;
+  if (!svcs.length) return send(env, uid, '💰 ما في خدمات منشورة حالياً. تابعنا 👌', kb);
   let txt = '💰 <b>قائمة الأسعار للعملاء</b>\nالسعر عن كل تنفيذ واحد:\n';
   let lastCat = '';
   for (const s of svcs) {
@@ -201,7 +216,35 @@ async function priceList(env, uid) {
     txt += `• ${esc(s.name)} — <b>${fmt(s.price)} ل.س</b>\n`;
   }
   txt += '\nللطلب روح «➕ اطلب خدمة» واختار من القائمة 👌';
-  await send(env, uid, txt, backKb);
+  await send(env, uid, txt, kb);
+}
+
+// ---------- Admin price management (per category, same style as the task sections) ----------
+async function priceAdminCats(env, uid) {
+  if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+  const cats = await all(env, `SELECT c.*, p.name pname FROM categories c LEFT JOIN categories p ON p.id=c.parent_id ORDER BY c.parent_id, c.id`);
+  if (!cats.length) return send(env, uid, 'ما في تصنيفات بعد. اعمل تصنيف أولاً من لوحة الأدمن ← التصنيفات.', backKb);
+  const kb = cats.map(c => [{ text: `${c.parent_id ? '↳ ' : '🗂 '}${esc(c.name)}`, callback_data: `prc:${c.id}` }]);
+  kb.push([{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }]);
+  return send(env, uid, '💰 <b>إدارة الأسعار</b>\nاختار تصنيف لتشوف خدماتو وأسعارها وتعدّلها:', { inline_keyboard: kb });
+}
+
+async function priceAdminList(env, uid, catId) {
+  if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+  const cat = await one(env, 'SELECT * FROM categories WHERE id=?', catId);
+  if (!cat) return priceAdminCats(env, uid);
+  const svcs = await all(env, 'SELECT * FROM services WHERE category_id=? ORDER BY id', catId);
+  let txt = `💰 <b>أسعار «${esc(cat.name)}»</b>\n`;
+  if (!svcs.length) txt += '\nما في خدمات بهالتصنيف بعد. ضيف أول خدمة بسعرها من الزر تحت 👇';
+  const kb = [];
+  for (const s of svcs) {
+    txt += `\n• <b>${esc(s.name)}</b> — العميل: <b>${fmt(s.price)}</b> · العامل: <b>${fmt(s.pay)}</b>`;
+    kb.push([{ text: `✏️ سعر «${s.name}»`, callback_data: `prcp:${s.id}` }, { text: `✏️ أجر «${s.name}»`, callback_data: `prcy:${s.id}` }]);
+    kb.push([{ text: `🗑 حذف «${s.name}»`, callback_data: `adm:delsvc:${catId}:${s.id}` }]);
+  }
+  kb.push([{ text: '➕ ضيف خدمة بسعر', callback_data: `adm:addsvc:${catId}` }]);
+  kb.push([{ text: '⬅️ كل التصنيفات', callback_data: 'adm:prices' }, { text: '⬅️ اللوحة', callback_data: 'adm:home' }]);
+  return send(env, uid, txt, { inline_keyboard: kb });
 }
 
 // ---------- Client self-serve ordering ----------
@@ -294,7 +337,8 @@ const adminKb = { inline_keyboard: [
 ]};
 const adminWorkKb = { inline_keyboard: [
   [{ text: '➕ مهمة جديدة', callback_data: 'adm:newtask' }, { text: '🗂 التصنيفات', callback_data: 'adm:cats' }],
-  [{ text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }, { text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
+  [{ text: '💰 إدارة الأسعار', callback_data: 'adm:prices' }, { text: '🗂 المهام المفتوحة', callback_data: 'adm:tasks' }],
+  [{ text: '✅ إثباتات بانتظاري', callback_data: 'adm:proofs' }],
   [{ text: '📥 طلبات خاصة', callback_data: 'adm:orders' }],
   [{ text: '⬅️ رجوع للوحة', callback_data: 'adm:home' }],
 ]};
@@ -509,6 +553,26 @@ async function handleStateText(env, uid, st, msg) {
     case 'tw_title': case 'tw_inst': case 'tw_price': case 'tw_pay': case 'tw_slots': case 'tw_dead':
       return wizardStep(env, uid, st, text);
 
+    case 'adm_svcprice': {
+      const v = parseNum(text);
+      if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb);
+      const svc = await one(env, 'SELECT * FROM services WHERE id=?', st.data.svc);
+      await clearState(env, uid);
+      if (!svc) return send(env, uid, 'الخدمة ما عادت موجودة.', backKb);
+      await run(env, 'UPDATE services SET price=? WHERE id=?', v, svc.id);
+      await send(env, uid, `✅ صار سعر العميل لـ «${esc(svc.name)}»: <b>${fmt(v)} ل.س</b>`);
+      return priceAdminList(env, uid, svc.category_id);
+    }
+    case 'adm_svcpay': {
+      const v = parseNum(text);
+      if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb);
+      const svc = await one(env, 'SELECT * FROM services WHERE id=?', st.data.svc);
+      await clearState(env, uid);
+      if (!svc) return send(env, uid, 'الخدمة ما عادت موجودة.', backKb);
+      await run(env, 'UPDATE services SET pay=? WHERE id=?', v, svc.id);
+      await send(env, uid, `✅ صار أجر العامل لـ «${esc(svc.name)}»: <b>${fmt(v)} ل.س</b>`);
+      return priceAdminList(env, uid, svc.category_id);
+    }
     case 'client_request': {
       await run(env, 'INSERT INTO orders(client_id,text,created_at) VALUES(?,?,?)', uid, text, now());
       await clearState(env, uid);
@@ -666,6 +730,14 @@ async function handleMessage(env, msg) {
   }
   const u = await ensureUser(env, msg.from);
   if (u.is_banned) return send(env, uid, '🚫 حسابك محظور. راجع الدعم.');
+  if (isAdmin(env, uid) && text.startsWith('/settoken ')) {
+    const tok = text.slice(10).trim();
+    if (tok.length > 20) {
+      await run(env, "INSERT INTO settings(key,value) VALUES('bot_token',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", tok);
+      _tok = tok;
+      return send(env, uid, '✅ اتحفظ التوكن والبوت صار جاهز. جرّب الأزرار هلأ.');
+    }
+  }
   if (!(await gate(env, uid))) return;
 
   // Active wizard state consumes text/photo first (except menu buttons).
@@ -853,6 +925,18 @@ async function handleCallback(env, cb) {
   }
   if (!isAdmin(env, uid)) return;
 
+  if (data === 'adm:prices') return priceAdminCats(env, uid);
+  if (data.startsWith('prc:')) return priceAdminList(env, uid, Number(data.slice(4)));
+  if (data.startsWith('prcp:')) {
+    if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+    await setState(env, uid, 'adm_svcprice', { svc: Number(data.slice(5)) });
+    return send(env, uid, '✏️ ابعت <b>سعر العميل</b> الجديد للتنفيذ الواحد (رقم بالليرة):', cancelKb);
+  }
+  if (data.startsWith('prcy:')) {
+    if (!isAdmin(env, uid)) return send(env, uid, 'هاد القسم للأدمن بس.', backKb);
+    await setState(env, uid, 'adm_svcpay', { svc: Number(data.slice(5)) });
+    return send(env, uid, '✏️ ابعت <b>أجر العامل</b> الجديد للتنفيذ الواحد (رقم بالليرة):', cancelKb);
+  }
   if (data === 'adm:home') return adminHome(env, uid);
   if (cmd === 'adm' && arg === 'grp') {
     if (arg2 === 'work') return send(env, uid, '📋 <b>المهام والتصنيفات</b>', adminWorkKb);

@@ -295,6 +295,24 @@ async function promoPost(env, text, kb) {
   }
 }
 
+async function bulkPct(env, qty) {
+  const q2 = parseNum(await setting(env, 'bulk_tier2_qty', '200'));
+  const p2 = parseNum(await setting(env, 'bulk_tier2_pct', '10'));
+  const q1 = parseNum(await setting(env, 'bulk_tier1_qty', '50'));
+  const p1 = parseNum(await setting(env, 'bulk_tier1_pct', '5'));
+  if (q2 > 0 && qty >= q2 && p2 > 0) return p2;
+  if (q1 > 0 && qty >= q1 && p1 > 0) return p1;
+  return 0;
+}
+
+async function firstDepositBonus(env, userId, amount) {
+  const fdp = parseNum(await setting(env, 'first_deposit_bonus_pct', '0'));
+  if (fdp <= 0 || amount <= 0) return 0;
+  const prev = await one(env, "SELECT COUNT(*) n FROM deposits WHERE user_id=? AND status='approved'", userId);
+  if (prev.n) return 0;
+  return Math.floor((amount * fdp) / 100);
+}
+
 async function topWorkers(env, days = 7) {
   const since = now() - days * 86400;
   return all(env, `SELECT c.worker_id, COUNT(*) n, COALESCE(SUM(t.pay),0) earned FROM claims c JOIN tasks t ON t.id=c.task_id WHERE c.status='approved' AND c.reviewed_at>=? GROUP BY c.worker_id ORDER BY n DESC, earned DESC LIMIT 5`, since);
@@ -428,7 +446,10 @@ async function offerView(env, uid, offerId) {
 async function offerPayScreen(env, uid, purchase) {
   const u = await getUser(env, uid);
   const methods = JSON.parse(await setting(env, 'deposit_methods', '[]'));
-  let txt = `🧾 <b>ملخص الشراء</b>\nالخدمة: ${esc(purchase.offer_name)}\nالعدد: ${purchase.qty}\n<b>المجموع: ${fmt(purchase.total)} ل.س</b>\n\nاختار طريقة الدفع:`;
+  let txt = `🧾 <b>ملخص الشراء</b>\nالخدمة: ${esc(purchase.offer_name)}\nالعدد: ${purchase.qty}\n<b>المجموع: ${fmt(purchase.total)} ل.س</b>`;
+  const off = purchase.offer_id ? await one(env, 'SELECT price FROM offers WHERE id=?', purchase.offer_id) : null;
+  if (off && off.price * purchase.qty > purchase.total) txt += `\n🎁 السعر قبل الخصم: ${fmt(off.price * purchase.qty)} ل.س — وفرت <b>${fmt(off.price * purchase.qty - purchase.total)} ل.س</b>`;
+  txt += '\n\nاختار طريقة الدفع:';
   const kb = [];
   if (u && u.balance >= purchase.total) kb.push([{ text: `💰 ادفع من رصيدي (${fmt(u.balance)} ل.س)`, callback_data: `ofrpay:${purchase.id}` }]);
   methods.forEach((mm, i) => kb.push([{ text: `💳 إيداع عبر ${mm.name}`, callback_data: `ofrdm:${purchase.id}:${i}` }]));
@@ -521,6 +542,7 @@ async function approveClaim(env, claim) {
     await run(env, "UPDATE tasks SET status='closed' WHERE id=?", t.id);
     await send(env, claim.worker_id, `🏁 اكتملت المهمة «${esc(t.title)}» وسكّرت تلقائياً.`);
     const adm = env.ADMIN_ID; if (adm) await send(env, adm, `🏁 اكتملت المهمة #${t.id} «${esc(t.title)}» (${fresh.slots_done}/${fresh.slots_total}) وسكّرت تلقائياً.`);
+    if (t.client_id) await promoPost(env, `✅ <b>مهمة عميل اكتملت بنجاح على مصاري</b>\n📌 ${esc(t.title)} — ${fresh.slots_done}/${fresh.slots_total} تنفيذ ✔️\nاطلب مهمتك وخلي التنفيذ علينا 👇`, { inline_keyboard: [[{ text: '🤖 افتح بوت مصاري', url: await deepLink(env, '') }]] });
   }
 }
 
@@ -701,7 +723,7 @@ async function adminChans(env, uid) {
 }
 
 async function adminSettings(env, uid) {
-  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days', 'usd_rate', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize'];
+  const keys = ['ref_worker_pct', 'ref_client_pct', 'min_withdraw', 'auto_approve_days', 'usd_rate', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize', 'first_order_discount_pct', 'first_deposit_bonus_pct', 'first_task_free', 'bulk_tier1_qty', 'bulk_tier1_pct', 'bulk_tier2_qty', 'bulk_tier2_pct'];
   const vals = {};
   for (const k of keys) vals[k] = await setting(env, k, '');
   const promo = await setting(env, 'promo_channel', '');
@@ -713,7 +735,7 @@ async function adminSettings(env, uid) {
     [{ text: '⬅️ رجوع', callback_data: 'adm:home' }],
   ]};
   await send(env, uid,
-    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم\n• سعر صرف الدولار (usd_rate): ${vals.usd_rate ? fmt(vals.usd_rate) + ' ل.س' : 'غير محدد — حددو كرمال حساب USDT'}\n• مكافأة أول مهمة (first_task_bonus): ${fmt(vals.first_task_bonus)} ل.س (٠ = مطفأة)\n• مرحلة الإحالة: كل ${vals.ref_milestone_every || '٠'} إحالة ← ${fmt(vals.ref_milestone_bonus)} ل.س (٠ = مطفأة)\n• جائزة مسابقة الأسبوع (contest_prize): ${fmt(vals.contest_prize)} ل.س (٠ = بلا جائزة)\n• قناة النشر الترويجي: ${promo || 'غير محددة'}`, kb);
+    `⚙️ <b>الإعدادات</b>\n• نسبة إحالة العامل: ${vals.ref_worker_pct}%\n• نسبة إحالة العميل: ${vals.ref_client_pct}%\n• حد السحب الأدنى: ${fmt(vals.min_withdraw)} ل.س\n• قبول تلقائي بعد صمت العميل: ${vals.auto_approve_days} يوم\n• سعر صرف الدولار (usd_rate): ${vals.usd_rate ? fmt(vals.usd_rate) + ' ل.س' : 'غير محدد — حددو كرمال حساب USDT'}\n• مكافأة أول مهمة (first_task_bonus): ${fmt(vals.first_task_bonus)} ل.س (٠ = مطفأة)\n• مرحلة الإحالة: كل ${vals.ref_milestone_every || '٠'} إحالة ← ${fmt(vals.ref_milestone_bonus)} ل.س (٠ = مطفأة)\n• جائزة مسابقة الأسبوع (contest_prize): ${fmt(vals.contest_prize)} ل.س (٠ = بلا جائزة)\n• خصم أول طلب من قائمة الأسعار (first_order_discount_pct): ${vals.first_order_discount_pct}%\n• مكافأة أول إيداع (first_deposit_bonus_pct): ${vals.first_deposit_bonus_pct}%\n• أول مهمة بلا عمولة (first_task_free): ${vals.first_task_free === '1' ? 'مفعّلة' : 'مطفأة'}\n• خصم كمية: من ${vals.bulk_tier1_qty} ← ${vals.bulk_tier1_pct}% • من ${vals.bulk_tier2_qty} ← ${vals.bulk_tier2_pct}%\n• قناة النشر الترويجي: ${promo || 'غير محددة'}`, kb);
 }
 
 const isUsdtMethod = (name) => /usdt|tether|تيثر|دولار/i.test(name || '');
@@ -762,6 +784,11 @@ async function notifyWorkers(env, t) {
 }
 
 async function publishTask(env, uid, d) {
+  // First task of a client is commission-free (worker gets the full price) when enabled.
+  if (d.client_id && parseNum(await setting(env, 'first_task_free', '0')) > 0) {
+    const prev = await one(env, 'SELECT COUNT(*) n FROM tasks WHERE client_id=?', d.client_id);
+    if (!prev.n) d.pay = d.price;
+  }
   // Escrow: client-funded tasks hold price*slots from the client balance first.
   if (d.client_id) {
     const c = await getUser(env, d.client_id);
@@ -887,7 +914,15 @@ async function handleStateText(env, uid, st, msg) {
       if (!qty || qty < 1) return send(env, uid, '⚠️ اكتب عدد صحيح أكبر من صفر:', cancelKb);
       const o = await one(env, 'SELECT * FROM offers WHERE id=? AND is_active=1', d.offer_id);
       if (!o) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.', backKb); }
-      const total = o.price * qty;
+      let total = o.price * qty;
+      const bp = await bulkPct(env, qty);
+      if (bp > 0) total -= Math.floor((total * bp) / 100);
+      const fop = parseNum(await setting(env, 'first_order_discount_pct', '0'));
+      if (fop > 0) {
+        const prev = await one(env, "SELECT COUNT(*) n FROM purchases WHERE user_id=? AND status<>'cancelled'", uid);
+        if (!prev.n) total -= Math.floor((total * fop) / 100);
+      }
+      if (total < 1) total = 1;
       const r = await run(env, 'INSERT INTO purchases(user_id,offer_id,offer_name,qty,total,created_at) VALUES(?,?,?,?,?,?)', uid, o.id, o.name, qty, total, now());
       const p = await one(env, 'SELECT * FROM purchases WHERE id=?', r.meta.last_row_id);
       await clearState(env, uid);
@@ -938,9 +973,17 @@ async function handleStateText(env, uid, st, msg) {
     case 'ofr_price': {
       const v = parseNum(text);
       if (!v || v <= 0) return send(env, uid, '⚠️ ابعت رقم صحيح أكبر من صفر:', cancelKb);
-      await run(env, 'INSERT INTO offers(name,details,price) VALUES(?,?,?)', d.name, d.details || '', v);
+      const r = await run(env, 'INSERT INTO offers(name,details,price) VALUES(?,?,?)', d.name, d.details || '', v);
+      const oid = r.meta.last_row_id;
       await clearState(env, uid);
       await send(env, uid, `✅ انضافت الخدمة الثابتة «${esc(d.name)}» لقائمة الأسعار.`);
+      const link = await deepLink(env, `ofr_${oid}`);
+      await promoPost(env, `🆕 <b>خدمة جديدة بقائمة أسعار مصاري!</b>\n🛒 ${esc(d.name)}\n💵 السعر: <b>${fmt(v)} ل.س</b>\n\nاطلبها مباشرة من البوت 👇`, { inline_keyboard: [[{ text: '🛒 شوف الخدمة', url: link }]] });
+      const clients = await all(env, "SELECT tg_id FROM users WHERE role='client' AND is_banned=0 LIMIT 500");
+      for (const c of clients) {
+        if (String(c.tg_id) === String(uid)) continue;
+        try { await send(env, c.tg_id, `🆕 <b>خدمة جديدة بقائمة الأسعار!</b>\n🛒 ${esc(d.name)} — ${fmt(v)} ل.س\nشوف شرحها واشتريها من «💰 قائمة الأسعار»`, { inline_keyboard: [[{ text: '🛒 شوف الخدمة', callback_data: `ofr:${oid}` }]] }); } catch (e) {}
+      }
       return adminOffers(env, uid);
     }
     case 'adm_ofr_price': {
@@ -1042,10 +1085,12 @@ async function handleStateText(env, uid, st, msg) {
       const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', d.service_id);
       if (!svc) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.'); }
       d.qty = qty; d.total = svc.price * qty;
+      const bp = await bulkPct(env, qty);
+      if (bp > 0) d.total -= Math.floor((d.total * bp) / 100);
       await setState(env, uid, 'ord_confirm', d);
       const u = await getUser(env, uid);
       return send(env, uid,
-        `🧾 <b>ملخص الطلب</b>\nالخدمة: ${esc(svc.name)}\nالسعر للتنفيذ: ${fmt(svc.price)} ل.س\nالعدد: ${qty}\n<b>المجموع: ${fmt(d.total)} ل.س</b>\nرصيدك الحالي: ${fmt(u.balance)} ل.س`,
+        `🧾 <b>ملخص الطلب</b>\nالخدمة: ${esc(svc.name)}\nالسعر للتنفيذ: ${fmt(svc.price)} ل.س\nالعدد: ${qty}\n<b>المجموع: ${fmt(d.total)} ل.س</b>${bp > 0 ? `\n🎁 شامل خصم كمية ${bp}% — وفرت ${fmt(svc.price * qty - d.total)} ل.س` : ''}\nرصيدك الحالي: ${fmt(u.balance)} ل.س`,
         { inline_keyboard: [[
           { text: '✅ تأكيد وخصم من رصيدي', callback_data: 'ordok' },
           { text: '❌ إلغاء', callback_data: 'ordno' }]] });
@@ -1069,7 +1114,7 @@ async function handleStateText(env, uid, st, msg) {
       return adminChans(env, uid);
     }
     case 'adm_set': {
-      const NUMKEYS = ['usd_rate', 'min_withdraw', 'ref_worker_pct', 'ref_client_pct', 'auto_approve_days', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize'];
+      const NUMKEYS = ['usd_rate', 'min_withdraw', 'ref_worker_pct', 'ref_client_pct', 'auto_approve_days', 'first_task_bonus', 'ref_milestone_every', 'ref_milestone_bonus', 'contest_prize', 'first_order_discount_pct', 'first_deposit_bonus_pct', 'first_task_free', 'bulk_tier1_qty', 'bulk_tier1_pct', 'bulk_tier2_qty', 'bulk_tier2_pct'];
       await setSetting(env, d.key, NUMKEYS.includes(d.key) ? String(parseNum(text)) : text);
       await clearState(env, uid);
       await send(env, uid, `✅ اتحدّث «${d.key}»`);
@@ -1079,9 +1124,11 @@ async function handleStateText(env, uid, st, msg) {
       const dep = await one(env, 'SELECT * FROM deposits WHERE id=?', d.dep_id);
       if (dep && dep.status === 'pending') {
         const amt = parseNum(text);
-        await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", amt, dep.id);
+        const bonus = await firstDepositBonus(env, dep.user_id, amt);
+        await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", amt + bonus, dep.id);
         await addBalance(env, dep.user_id, amt, 'deposit', `dep:${dep.id}`);
-        await send(env, dep.user_id, `✅ انعتمد إيداعك وانضاف ${fmt(amt)} ل.س لرصيدك 💸`);
+        if (bonus > 0) await addBalance(env, dep.user_id, bonus, 'deposit', `dep_bonus:${dep.id}`);
+        await send(env, dep.user_id, `✅ انعتمد إيداعك وانضاف ${fmt(amt)} ل.س لرصيدك 💸${bonus > 0 ? `\n🎁 <b>مكافأة أول إيداع:</b> +${fmt(bonus)} ل.س` : ''}`);
       }
       await clearState(env, uid);
       return adminDeps(env, uid);
@@ -1217,8 +1264,10 @@ async function handleCallback(env, cb) {
   }
   if (data === 'role:client' || data === 'role:worker') {
     const role = data === 'role:client' ? 'client' : 'worker';
+    const before = await getUser(env, uid);
     await run(env, 'UPDATE users SET role=? WHERE tg_id=?', role, uid);
     await send(env, uid, role === 'client' ? '🧑‍💼 تمام — انت بصفة <b>عميل</b>.' : '👷 تمام — انت بصفة <b>عامل</b>.');
+    if (role === 'client' && !before?.role) await send(env, uid, `🛡 <b>ضمان مصاري إلك كعميل:</b>\nفلوسك بتنحجز كضمان وما بتتحرر للعامل إلا بعد ما توافق انت عالشغل (أو تنقضي مهلة المراجعة). وإذا ما تنفذت مهمتك، بيرجع المحجوز لرصيدك. اطلب وانت مرتاح 👌`);
     return showHome(env, uid);
   }
   if (data === 'cv:ats' || data === 'cv:euro') {
@@ -1319,20 +1368,28 @@ async function handleCallback(env, cb) {
     await clearState(env, uid); // consume the confirmation at once — a double-tap cannot deduct twice
     const svc = await one(env, 'SELECT * FROM services WHERE id=? AND is_active=1', d.service_id);
     if (!svc) { await clearState(env, uid); return send(env, uid, '⚠️ هالخدمة ما عادت متاحة.'); }
-    const total = svc.price * d.qty;
+    let total = svc.price * d.qty;
+    const bp = await bulkPct(env, d.qty);
+    if (bp > 0) total -= Math.floor((total * bp) / 100);
     const u = await getUser(env, uid);
     if (u.balance < total) {
       await clearState(env, uid);
       return send(env, uid, `⚠️ <b>رصيدك ما بيكفي</b>\nالمطلوب: ${fmt(total)} ل.س — رصيدك: ${fmt(u.balance)} ل.س\nاشحن محفظتك وارجع اطلب.`, { inline_keyboard: [[{ text: '➕ إيداع', callback_data: 'dep' }], [{ text: '⬅️ رجوع', callback_data: 'home' }]] });
     }
     await addBalance(env, uid, -total, 'escrow', 'order');
+    let pay = svc.pay;
+    let freeFirst = false;
+    if (parseNum(await setting(env, 'first_task_free', '0')) > 0) {
+      const prev = await one(env, 'SELECT COUNT(*) n FROM tasks WHERE client_id=?', uid);
+      if (!prev.n) { pay = svc.price; freeFirst = true; }
+    }
     const instructions = [svc.instructions, d.desc ? `— تفاصيل العميل:\n${d.desc}` : ''].filter(Boolean).join('\n');
     const r = await run(env, `INSERT INTO tasks(category_id,client_id,title,instructions,proof_type,price,pay,slots_total,reviewer,deadline,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, svc.category_id, uid, svc.name, instructions, svc.proof_type, svc.price, svc.pay, d.qty, svc.reviewer, '', now());
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, svc.category_id, uid, svc.name, instructions, svc.proof_type, svc.price, pay, d.qty, svc.reviewer, '', now());
     const t = await one(env, 'SELECT * FROM tasks WHERE id=?', r.meta.last_row_id);
     await clearState(env, uid);
     const fresh = await getUser(env, uid);
-    await send(env, uid, `✅ <b>تم طلبك ونزلت المهمة #${t.id} للعمال فوراً</b>\n📌 ${esc(svc.name)} × ${d.qty}\nانخصم ${fmt(total)} ل.س — رصيدك هلأ ${fmt(fresh.balance)} ل.س\nبتوصلك إشعارات مع كل تنفيذ بينقبل 👌`, await mainKb(env, uid));
+    await send(env, uid, `✅ <b>تم طلبك ونزلت المهمة #${t.id} للعمال فوراً</b>\n📌 ${esc(svc.name)} × ${d.qty}\nانخصم ${fmt(total)} ل.س — رصيدك هلأ ${fmt(fresh.balance)} ل.س${freeFirst ? '\n🎁 <b>أول مهمة إلك بلا عمولة منصة</b> — أجر العامل فيها هو السعر كامل' : ''}\nبتوصلك إشعارات مع كل تنفيذ بينقبل 👌`, await mainKb(env, uid));
     await notifyWorkers(env, t);
     if (env.ADMIN_ID && String(env.ADMIN_ID) !== String(uid)) await send(env, env.ADMIN_ID, `🛒 طلب ذاتي جديد: «${esc(svc.name)}» × ${d.qty} من ${uid} (${fmt(total)} ل.س)`);
     return;
@@ -1519,10 +1576,12 @@ async function handleCallback(env, cb) {
       return send(env, uid, '✅ اعتمد الإيداع (الشراء ما عاد بانتظار الدفع).');
     }
     if (dep.amount > 0) {
-      await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", dep.amount, dep.id);
+      const bonus = await firstDepositBonus(env, dep.user_id, dep.amount);
+      await run(env, "UPDATE deposits SET status='approved', credited=? WHERE id=?", dep.amount + bonus, dep.id);
       await addBalance(env, dep.user_id, dep.amount, 'deposit', `dep:${dep.id}`);
-      await send(env, dep.user_id, `✅ <b>انضاف إيداعك!</b>\nانضاف ${fmt(dep.amount)} ل.س لرصيدك 💸`);
-      return send(env, uid, `✅ اعتمد الإيداع #${dep.id} وانضاف ${fmt(dep.amount)} ل.س للمستخدم.`);
+      if (bonus > 0) await addBalance(env, dep.user_id, bonus, 'deposit', `dep_bonus:${dep.id}`);
+      await send(env, dep.user_id, `✅ <b>انضاف إيداعك!</b>\nانضاف ${fmt(dep.amount)} ل.س لرصيدك 💸${bonus > 0 ? `\n🎁 <b>مكافأة أول إيداع:</b> +${fmt(bonus)} ل.س` : ''}`);
+      return send(env, uid, `✅ اعتمد الإيداع #${dep.id} وانضاف ${fmt(dep.amount + bonus)} ل.س للمستخدم.`);
     }
     await setState(env, uid, 'adm_dep_amount', { dep_id: dep.id });
     return send(env, uid, '💰 كم المبلغ يلي بينضاف لرصيد المستخدم؟ (ل.س)');
@@ -1640,7 +1699,7 @@ const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS offers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, details TEXT DEFAULT '', price INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, offer_id INTEGER, offer_name TEXT DEFAULT '', qty INTEGER NOT NULL DEFAULT 1, total INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'awaiting_payment', deposit_id INTEGER, created_at INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS cv_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, system TEXT DEFAULT '', data TEXT DEFAULT '{}', status TEXT NOT NULL DEFAULT 'new', created_at INTEGER NOT NULL DEFAULT 0)`,
-  `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]'), ('promo_channel', ''), ('first_task_bonus', '0'), ('ref_milestone_every', '0'), ('ref_milestone_bonus', '0'), ('contest_prize', '0')`,
+  `INSERT OR IGNORE INTO settings(key, value) VALUES ('ref_worker_pct', '5'), ('ref_client_pct', '10'), ('min_withdraw', '25000'), ('auto_approve_days', '3'), ('welcome_text', 'أهلا فيك بـ مصاري 💸\nنفّذ مهام واجمع مصاريك، أو اطلب خدمة وخلي التنفيذ علينا.'), ('deposit_methods', '[]'), ('promo_channel', ''), ('first_task_bonus', '0'), ('ref_milestone_every', '0'), ('ref_milestone_bonus', '0'), ('contest_prize', '0'), ('first_order_discount_pct', '20'), ('first_deposit_bonus_pct', '5'), ('first_task_free', '1'), ('bulk_tier1_qty', '50'), ('bulk_tier1_pct', '5'), ('bulk_tier2_qty', '200'), ('bulk_tier2_pct', '10')`,
 ];
 
 const MIGRATIONS = [
